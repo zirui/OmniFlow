@@ -1,0 +1,11 @@
+torch>=2.0.0
+transformers>=4.40.0
+diffusers>=0.27.0
+einops
+loguru
+safetensors
+pyyaml
+numpy
+pillow
+qwen_vl_utils
+decord
