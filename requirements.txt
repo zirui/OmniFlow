@@ -9,3 +9,7 @@ numpy
 pillow
 qwen_vl_utils
 decord
+pydantic
+accelerate
+wandb
+deepspeed

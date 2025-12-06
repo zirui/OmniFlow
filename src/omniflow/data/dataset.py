@@ -68,8 +68,6 @@ class WanVideoDataset(BaseDataset):
         self,
         data_path: str,
         processor,
-        frame_num: int = 49,
-        video_backend: str = 'qwen_vl_utils',
         config={}
     ):
         """
@@ -107,37 +105,17 @@ class WanVideoDataset(BaseDataset):
             
         return samples
     
-    def _load_video_frames(self, video_path: str, fps: int = 1) -> Tuple[np.ndarray, float]:
+    def _load_video_frames(self, video_path: str, data_folder=None, fps: int = 1) -> Tuple[np.ndarray, float]:
         """Load video frames using the specified backend."""
+        if data_folder is not None:
+            video_path = os.path.join(data_folder, video_path)
+
         if self.config.video_backend == "decord":
             return self.load_video_decord(video_path, fps)
         elif self.config.video_backend == "qwen_vl_utils":
             return self.load_video_qwen_vl_utils(video_path, fps)
         else:
             raise ValueError(f"Unsupported video backend: {self.config.video_backend}")
-
-        # if self.video_backend == 'qwen_vl_utils':
-        #     from qwen_vl_utils import fetch_video
-        #     video_frames, _ = fetch_video(video_path, self.frame_num)
-        #     return video_frames
-        # elif self.video_backend == 'decord':
-        #     import decord
-        #     from decord import VideoReader, cpu
-        #     decord.bridge.set_bridge('torch')
-            
-        #     vr = VideoReader(video_path, ctx=cpu(0))
-        #     total_frames = len(vr)
-            
-        #     # Sample frames uniformly
-        #     indices = torch.linspace(0, total_frames - 1, self.frame_num).long()
-        #     frames = vr.get_batch(indices).numpy()
-            
-        #     # Convert to PIL Images
-        #     from PIL import Image
-        #     video_frames = [Image.fromarray(frame) for frame in frames]
-        #     return video_frames
-        # else:
-        #     raise ValueError(f"Unsupported video backend: {self.video_backend}")
 
     def load_video_decord(
         self,
@@ -217,8 +195,6 @@ class WanVideoDataset(BaseDataset):
             return frames, sample_fps
         else:
             raise ValueError(f"Invalid video sampling strategy: {self.config.video_sampling_strategy}")
-
-
     
     def __len__(self) -> int:
         return len(self.samples)

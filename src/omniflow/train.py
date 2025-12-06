@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-"""
+"""training entry point"""
 
 import argparse
 import sys
@@ -62,8 +61,6 @@ def build_dataset(dataset_config: dict):
     dataset = WanVideoDataset(
         data_path=dataset_config['dataset_path'],
         processor=processor,
-        frame_num=dataset_config.get('frame_num', 49),
-        video_backend=dataset_config.get('video_backend', 'qwen_vl_utils'),
         config = DatasetConfig(**dataset_config)
     )
     dataset.build()

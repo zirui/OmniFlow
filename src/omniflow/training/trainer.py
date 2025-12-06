@@ -1,8 +1,4 @@
-"""
-WanVideo Trainer - Standalone Version
-
-Custom trainer for WanVideo diffusion training.
-Removed lmms_engine dependencies.
+"""Custom HF trainer for diffusion training.
 """
 
 import math
@@ -14,6 +10,7 @@ import torch.nn as nn
 from loguru import logger
 from transformers import Trainer as HFTrainer
 from transformers import TrainerCallback
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from .scheduler import FlowMatchScheduler
 
@@ -101,7 +98,11 @@ class WanVideoTrainer(HFTrainer):
         timestep = self.scheduler.timesteps[timestep_id]
 
         # Preprocess inputs (encode video, text, etc.)
-        pre_precessed_inputs = model.forward_preprocess(self.scheduler, inputs_dict)
+        if isinstance(model, FSDP):
+            with FSDP.summon_full_params(model, writeback=False, rank0_only=False):
+                pre_precessed_inputs = model.forward_preprocess(self.scheduler, inputs_dict)
+        else:
+            pre_precessed_inputs = model.forward_preprocess(self.scheduler, inputs_dict)
         
         # Compute training target
         training_target = self.scheduler.training_target(

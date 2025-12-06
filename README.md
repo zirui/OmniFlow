@@ -8,21 +8,28 @@ A flexible training framework for multi-modality.
 
 - Models
 
-| model  | deepspeed  | FSDP  |HSDP| cp  | ulysses  |
+| model  | deepspeed  | FSDP  |CP  | Ulysses  |USP|
 |---|---|---|---|---|--|
-| wan2  | y  |   |   |   ||
-| hunyuan-video  |   |   |   |   ||
+| Wan2  | ✅  | ✅  | ❌  | ❌ |❌ |
+| Hunyuan-video  |   |   |   |   ||
 
 ## TODO:
-- parallism 
-    - [ ] FSDP
-    - [ ] CP
+1. **Parallism**
+  - [ ] CP
+  - [ ] Ulysses
+  - [ ] USP
+2. **Models**
+   - [ ] hunyuan-video
+3. **Sparse Attention**
     - [ ] BSA
-- Models
-    - [ ] hunyuan-video
-- Block Sparse Attention
-- Backend
-  - [ ]torchtitan
+    - [ ] SA
+4. **Backend**
+   - [ ] native pytorch trainer
+   - [ ] torchtitan
+5. **Data**
+  - [ ] video streaming input
+6. **Evaluaton**
+  * [ ] integreted video-gen eval
 
 
 ## Installation

@@ -3,7 +3,7 @@ trainer_type: wan_trainer
 dataset_config:
   dataset_type: vision
   dataset_format: jsonl
-  dataset_path: /root/zirui/data/example_video_dataset/metadata.jsonl
+  dataset_path: /zirui/data/example_video_dataset/metadata.jsonl
   video_sampling_strategy: frame_num
   frame_num: 49
   shuffle: false
@@ -55,7 +55,7 @@ trainer_args:
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
   gradient_accumulation_steps: 4  # Higher for 14B model
-  gradient_checkpointing: true
+  # gradient_checkpointing: true
   
   learning_rate: 5.0e-6  # Lower LR for larger model
   weight_decay: 0.01
@@ -67,10 +67,10 @@ trainer_args:
   save_total_limit: 1
   
   dataloader_num_workers: 4
-  run_name: wan2.2_t2v-5b-h200-alone
+  run_name: wan2.2_t2v-5b-mi355-g2
   fp16: false
   bf16: true
-  tf32: true
+  # tf32: true
   
   seed: 42
   remove_unused_columns: false
@@ -84,14 +84,14 @@ trainer_args:
   
   # deepspeed: examples/ds_config/default_config.json
   
-      # FSDP configuration for multi-GPU training
-      # fsdp: "full_shard auto_wrap"
-      # fsdp_config:
-      #   backward_prefetch: "backward_pre"
-      #   forward_prefetch: true
-      #   use_orig_params: false
-      #   cpu_ram_efficient_loading: true
-      #   sync_module_states: true
-      #   limit_all_gathers: true
-      #   activation_checkpointing: true
+  # FSDP configuration for multi-GPU training
+  fsdp: "full_shard auto_wrap"
+  fsdp_config:
+    backward_prefetch: "backward_pre"
+    forward_prefetch: true
+    use_orig_params: true
+    cpu_ram_efficient_loading: true
+    sync_module_states: true
+    limit_all_gathers: true
+    activation_checkpointing: true
   
