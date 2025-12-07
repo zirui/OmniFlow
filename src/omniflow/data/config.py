@@ -21,6 +21,7 @@ class ProcessorConfig(Args):
 
 class DatasetConfig(Args):
     dataset_type: str
+    data_folder: str
     dataset_format: Literal["json", "jsonl", "csv", "yaml", "hf_dataset", "arrow"]
     processor_config: Union[dict, ProcessorConfig]
 

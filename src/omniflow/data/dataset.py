@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 from io import BytesIO
+import os
 
 import torch
 from torch.utils.data import Dataset
@@ -82,8 +83,6 @@ class WanVideoDataset(BaseDataset):
         self.config = config
         self.data_path = Path(data_path)
         self.processor = processor
-        # self.frame_num = frame_num
-        # self.video_backend = video_backend
         
         # Load metadata
         self.samples = self._load_metadata()
@@ -96,6 +95,9 @@ class WanVideoDataset(BaseDataset):
             with open(self.data_path, 'r') as f:
                 for line in f:
                     samples.append(json.loads(line.strip()))
+        elif self.data_path.suffix == '.json':
+            with open(self.data_path, 'r') as f:
+                samples = json.load(f)
         elif self.data_path.suffix == '.csv':
             import pandas as pd
             df = pd.read_csv(self.data_path)
@@ -107,8 +109,8 @@ class WanVideoDataset(BaseDataset):
     
     def _load_video_frames(self, video_path: str, data_folder=None, fps: int = 1) -> Tuple[np.ndarray, float]:
         """Load video frames using the specified backend."""
-        if data_folder is not None:
-            video_path = os.path.join(data_folder, video_path)
+        if self.config.data_folder is not None:
+            video_path = os.path.join(self.config.data_folder, video_path)
 
         if self.config.video_backend == "decord":
             return self.load_video_decord(video_path, fps)
