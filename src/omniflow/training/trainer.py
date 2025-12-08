@@ -102,7 +102,10 @@ class WanVideoTrainer(HFTrainer):
             with FSDP.summon_full_params(model, writeback=False, rank0_only=False):
                 pre_precessed_inputs = model.forward_preprocess(self.scheduler, inputs_dict)
         else:
+            # TODO: zirui, fix ddp bug
+            model = model.module if hasattr(model, "module") else model
             pre_precessed_inputs = model.forward_preprocess(self.scheduler, inputs_dict)
+            # pre_precessed_inputs = model.forward_preprocess(self.scheduler, inputs_dict)
         
         # Compute training target
         training_target = self.scheduler.training_target(

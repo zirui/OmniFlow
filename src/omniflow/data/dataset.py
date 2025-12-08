@@ -9,16 +9,13 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 from io import BytesIO
 import os
+from decord import VideoReader, cpu
+from loguru import logger
 
 import torch
 from torch.utils.data import Dataset
-from loguru import logger
-
-try:
-    from qwen_vl_utils import fetch_video
-except ImportError:
-    logger.info("qwen_vl_utils not installed. Skipping import.")
-
+from omniflow.utils.data_utils import smart_nframes
+from omniflow.utils import fetch_video
 
 from .collator import VisionCollator
 
@@ -40,6 +37,12 @@ class BaseDataset(Dataset):
         # self.processor_config = config.processor_config
         # if isinstance(self.processor_config, dict):
         #     self.processor_config = ProcessorConfig(**self.processor_config)
+        self.samples = []
+        self.skip = set([19, 20])
+        self.valid_indices = [i for i in range(len(self.samples)) if i not in self.skip]
+
+    def __len__(self):
+        return len(self.valid_indices)
 
     def build(self):
         """
@@ -80,12 +83,16 @@ class WanVideoDataset(BaseDataset):
             frame_num: Number of frames to sample from each video
             video_backend: Backend for video loading ('qwen_vl_utils' or 'decord')
         """
+        super().__init__(config)
         self.config = config
         self.data_path = Path(data_path)
         self.processor = processor
         
         # Load metadata
         self.samples = self._load_metadata()
+        
+        # Initialize valid_indices after loading samples
+        self.valid_indices = [i for i in range(len(self.samples)) if i not in self.skip]
         
     def _load_metadata(self) -> List[Dict]:
         """Load metadata from JSONL or CSV file."""
@@ -134,6 +141,8 @@ class WanVideoDataset(BaseDataset):
         Returns:
             Tuple of (video frames, sample fps)
         """
+        print(f"{video_path=}", flush=True)
+
         if isinstance(video_path, str) or isinstance(video_path, BytesIO):
             vr = VideoReader(video_path, ctx=cpu(0), num_threads=1)
         elif isinstance(video_path, list):
@@ -143,7 +152,7 @@ class WanVideoDataset(BaseDataset):
 
         total_frames, video_fps = len(vr), vr.get_avg_fps()
         if self.config.video_sampling_strategy == "fps":
-            nframes = DataUtilities.smart_nframes(total_frames, video_fps=video_fps, fps=fps)
+            nframes = smart_nframes(total_frames, video_fps=video_fps, fps=fps)
         elif self.config.video_sampling_strategy == "frame_num":
             nframes = self.config.frame_num
         else:
@@ -178,7 +187,7 @@ class WanVideoDataset(BaseDataset):
             "max_frames": self.config.video_max_frames,
             "min_pixels": self.config.video_min_pixels,
         }
-        # print(f"{video_dict=}")
+        print(f"{video_dict=}", flush=True)
 
         if self.config.video_sampling_strategy == "frame_num":
             is_even = self.config.frame_num % 2 == 0
@@ -203,7 +212,9 @@ class WanVideoDataset(BaseDataset):
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Get a single sample."""
-        sample = self.samples[idx]
+        real_idx = self.valid_indices[idx]
+        print(f"{idx=} {real_idx=}", flush=True)
+        sample = self.samples[real_idx]
         
         # Load video frames
         video_path = sample['video']
