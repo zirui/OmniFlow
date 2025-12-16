@@ -21,11 +21,13 @@ A flexible training framework for multi-modality.
 2. **Models**
    - [ ] hunyuan-video
 3. **Sparse Attention**
+    - [ ] FA2/FA3
+    - [ ] SSA
     - [ ] BSA
-    - [ ] SA
+    - [ ] VSA
 4. **Backend**
    - [ ] native pytorch trainer
-   - [ ] torchtitan
+   - [x] torchtitan
 5. **Data**
   - [ ] video streaming input
 6. **Evaluaton**
@@ -37,6 +39,14 @@ A flexible training framework for multi-modality.
 1. Install dependencies:
 ```bash
 pip install -r requirements.txt
+
+# update submodules
+git submodule update --init --recursive
+pip install -r third_party/torchtitan/requirements.txt 
+
+# Load pretrained models(if needed)
+huggingface-cli download Wan-AI/Wan2.1-T2V-14B Wan2.1_VAE.pth --local-dir ./checkpoints --local-dir-use-symlinks False
+huggingface-cli download Wan-AI/Wan2.1-T2V-14B models_t5_umt5-xxl-enc-bf16.pth --local-dir ./checkpoints --local-dir-use-symlinks False
 ```
 
 ## Directory Structure
@@ -65,6 +75,10 @@ Prepare your video dataset in JSONL format:
 
 ```bash
 python train.py --config configs/wan2.2_t2v_5b.yaml
+
+
+# torchtitan
+cd third_party/torchtitan && bash -x torchtitan/experiments/wan/run_train.sh
 ```
 
 **Multi-GPU (Distributed):**
