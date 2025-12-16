@@ -38,18 +38,40 @@ A flexible training framework for multi-modality.
 
 1. Install dependencies:
 ```bash
-pip install -r requirements.txt
-
-# update submodules
+# Update submodules
 git submodule update --init --recursive
-pip install -r third_party/torchtitan/requirements.txt 
 
-# Load pretrained models(if needed)
+# Install dependencies
+pip install -r requirements.txt
+pip install -r third_party/torchtitan/requirements.txt 
+```
+
+2. Download pretrained models(if needed):
+```bash
 huggingface-cli download Wan-AI/Wan2.1-T2V-14B Wan2.1_VAE.pth --local-dir ./checkpoints --local-dir-use-symlinks False
 huggingface-cli download Wan-AI/Wan2.1-T2V-14B models_t5_umt5-xxl-enc-bf16.pth --local-dir ./checkpoints --local-dir-use-symlinks False
 ```
 
 ## Directory Structure
+
+
+```text
+.
+|-- notebooks
+|-- src
+|   |-- omniflow
+|   |   |-- configs
+|   |   |-- data
+|   |   |-- models
+|   |   |-- training
+|   |   `-- utils
+|   `-- wan_torchtitan
+|       |-- model
+|       `-- train_configs
+`-- third_party
+    `-- torchtitan
+```
+
 
 - `models/`: model definitions.
 - `data/`: Data processing and dataset loading.
