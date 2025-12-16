@@ -19,7 +19,6 @@ logger = logging.get_logger(__name__)
 try:
     from flash_attn import flash_attn_func
 
-    # TODO: zirui, temporarily disabled flash attention
     # FLASH_ATTN_2_AVAILABLE = True
     FLASH_ATTN_2_AVAILABLE = False
 except ImportError:
@@ -87,6 +86,9 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
+
+    def reset_parameters(self):
+        nn.init.ones_(self.weight)
 
     def norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
@@ -212,6 +214,17 @@ class DiTBlock(GradientCheckpointingLayer):
         self.modulation = nn.Parameter(torch.randn(1, 6, hidden_size) / hidden_size**0.5)
         self.gate = GateModule()
 
+    def reset_parameters(self):
+        # Initialize modulation
+        nn.init.normal_(self.modulation, mean=0.0, std=1.0 / self.hidden_size**0.5)
+        
+        # Recurse for submodules that might need it if they are custom, 
+        # but usually FSDP handles recursion or we can trust standard layers.
+        # For safety/completeness if FSDP relies on top-level call for this module:
+        for module in self.modules():
+            if module != self and hasattr(module, 'reset_parameters'):
+                module.reset_parameters()
+
     def forward(self, x, context, t_mod, freqs):
         has_seq = len(t_mod.shape) == 4
         chunk_dim = 2 if has_seq else 1
@@ -250,6 +263,16 @@ class MLP(torch.nn.Module):
         if has_pos_emb:
             self.emb_pos = torch.nn.Parameter(torch.zeros((1, 514, 1280)))
 
+    def reset_parameters(self):
+        # Default init for Sequential layers is usually fine/handled.
+        if self.has_pos_emb:
+            nn.init.zeros_(self.emb_pos)
+        
+        # Explicitly reset Sequential submodules
+        for layer in self.proj:
+            if hasattr(layer, 'reset_parameters'):
+                layer.reset_parameters()
+
     def forward(self, x):
         if self.has_pos_emb:
             x = x + self.emb_pos.to(dtype=x.dtype, device=x.device)
@@ -270,6 +293,11 @@ class Head(nn.Module):
         self.norm = nn.LayerNorm(hidden_size, eps=eps, elementwise_affine=False)
         self.head = nn.Linear(hidden_size, out_channels * math.prod(patch_size))
         self.modulation = nn.Parameter(torch.randn(1, 2, hidden_size) / hidden_size**0.5)
+
+    def reset_parameters(self):
+        self.norm.reset_parameters()
+        self.head.reset_parameters()
+        nn.init.normal_(self.modulation, mean=0.0, std=1.0 / self.hidden_size**0.5)
 
     def forward(self, x, t_mod):
         if len(t_mod.shape) == 3:

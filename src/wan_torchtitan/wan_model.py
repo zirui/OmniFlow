@@ -1,0 +1,147 @@
+import torch
+import torch.nn as nn
+from torchtitan.protocols.model import ModelProtocol
+
+from .wan_args import WanModelArgs
+from .model import WanVideoForConditionalGeneration, WanVideoConfig
+from .model.wan_video_scheduler import FlowMatchScheduler
+
+
+class WanVideoModel(nn.Module, ModelProtocol):
+    def __init__(self, model_args: WanModelArgs):
+        super().__init__()
+        # nn.Module.__init__(self)
+
+        self.model_args = model_args
+
+        # Convert WanModelArgs to WanVideoConfig
+        config_dict = {
+            k: v
+            for k, v in vars(model_args).items()
+            if k in WanVideoConfig.__annotations__ or k in WanVideoConfig().__dict__
+        }
+
+        wan_config = WanVideoConfig(**config_dict)
+        self.model = WanVideoForConditionalGeneration(wan_config)
+
+
+        self.scheduler = FlowMatchScheduler(
+            shift=5.0, sigma_min=0.0, extra_one_step=True
+        )
+        self.scheduler.set_timesteps(1000, training=True)
+
+        # Load pretrained weights for frozen components
+        if self.model_args.vae_checkpoint_path:
+            print(f"Loading VAE from {self.model_args.vae_checkpoint_path}")
+            vae_state_dict = torch.load(
+                self.model_args.vae_checkpoint_path, map_location="cpu"
+            )
+            self.model.vae.load_state_dict(vae_state_dict, strict=True)
+            print("VAE loaded.")
+
+        if self.model_args.t5_checkpoint_path:
+            print(f"Loading T5 from {self.model_args.t5_checkpoint_path}")
+            # T5 might be saved as a full state dict or HF format.
+            # Assuming torch.save/load format for now based on .pth extension in user prompt.
+            t5_state_dict = torch.load(
+                self.model_args.t5_checkpoint_path, map_location="cpu"
+            )
+            self.model.text_encoder.load_state_dict(t5_state_dict, strict=True)
+            print("T5 loaded.")
+
+    def init_weights(self, buffer_device=None):
+        """Initialize model weights."""
+        # TODO: zirui 
+        # WanVideo weights are initialized in its __init__ via transformers PreTrainedModel mechanism.
+        # we can explicitly call init_weights if needed, or just pass if already handled.
+        pass
+        
+
+    def forward(self, inputs, **kwargs):
+        # Reconstruct inputs_dict
+        video = inputs
+        inputs_dict = {"video": video}
+        inputs_dict.update(kwargs)
+
+        device = video.device
+
+        # Add missing keys with defaults if not present
+        defaults = {
+            "input_ids": None,
+            "attention_mask": None,
+            "cfg_scale": 1,
+            "cfg_merge": False,
+            "vace_scale": 1,
+            "seed": None,
+            "vace_reference_image": None,
+            "reference_image": None,
+            "tiled": False,
+            "tile_size": None,
+            "tile_stride": None,
+            "end_image": None,
+            "camera_control_direction": None,
+            "camera_control_speed": None,
+            "camera_control_origin": None,
+            "control_video": None,
+            "motion_bucket_id": None,
+            "vace_video": None,
+            "vace_video_mask": None,
+            "input_image": video[0] if video.ndim > 1 else None,  # simplified
+        }
+        for k, v in defaults.items():
+            inputs_dict.setdefault(k, v)
+
+        # Recover height/width/num_frames
+        if "height" not in inputs_dict:
+            inputs_dict["num_frames"], inputs_dict["height"], inputs_dict["width"] = (
+                video.shape[:3]
+            )
+
+        # Sample random timestep
+        max_timestep_boundary = int(1 * self.scheduler.num_train_timesteps)
+        min_timestep_boundary = int(0 * self.scheduler.num_train_timesteps)
+        timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
+        timestep = self.scheduler.timesteps[timestep_id]
+
+        # print(f"timestep_id: {timestep_id}, timestep: {timestep}, device: {timestep.device}", flush=True)
+
+        # Preprocess
+        # OOM Fix: VAE and TextEncoder are frozen and heavy. Ensure no gradients are computed.
+        with torch.no_grad():
+            pre_processed_inputs = self.model.forward_preprocess(
+                self.scheduler, inputs_dict
+            )
+
+        # Compute training target
+        training_target = self.scheduler.training_target(
+            pre_processed_inputs["input_latents"],
+            pre_processed_inputs["noise"],
+            timestep,
+        )
+
+        # Add noise
+        pre_processed_inputs["latents"] = self.scheduler.add_noise(
+            pre_processed_inputs["input_latents"],
+            pre_processed_inputs["noise"],
+            timestep,
+        )
+
+        # Forward
+        output = self.model(
+            latents=pre_processed_inputs.get("latents", None),
+            context=pre_processed_inputs.get("context", None),
+            timestep=timestep,
+            y=pre_processed_inputs.get("y", None),
+            reference_latents=pre_processed_inputs.get("reference_latents", None),
+            clip_feature=pre_processed_inputs.get("clip_feature", None),
+            vace_context=pre_processed_inputs.get("vace_context", None),
+            vace_scale=pre_processed_inputs.get("vace_scale", 1.0),
+            motion_bucket_id=pre_processed_inputs.get("motion_bucket_id", None),
+            control_camera_latents_input=pre_processed_inputs.get(
+                "control_camera_latents_input", None
+            ),
+        )
+
+        # Return tuple for Loss function
+        # (noise_pred, training_target, timestep)
+        return output.noise_pred, training_target, timestep

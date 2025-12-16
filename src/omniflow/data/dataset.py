@@ -38,11 +38,12 @@ class BaseDataset(Dataset):
         # if isinstance(self.processor_config, dict):
         #     self.processor_config = ProcessorConfig(**self.processor_config)
         self.samples = []
-        self.skip = set([19, 20])
-        self.valid_indices = [i for i in range(len(self.samples)) if i not in self.skip]
+        # self.skip = set([19, 20])
+        # self.valid_indices = [i for i in range(len(self.samples)) if i not in self.skip]
 
     def __len__(self):
-        return len(self.valid_indices)
+        # return len(self.valid_indices)
+        return len(self.samples)
 
     def build(self):
         """
@@ -92,7 +93,7 @@ class WanVideoDataset(BaseDataset):
         self.samples = self._load_metadata()
         
         # Initialize valid_indices after loading samples
-        self.valid_indices = [i for i in range(len(self.samples)) if i not in self.skip]
+        # self.valid_indices = [i for i in range(len(self.samples)) if i not in self.skip]
         
     def _load_metadata(self) -> List[Dict]:
         """Load metadata from JSONL or CSV file."""
@@ -110,7 +111,7 @@ class WanVideoDataset(BaseDataset):
             df = pd.read_csv(self.data_path)
             samples = df.to_dict('records')
         else:
-            raise ValueError(f"Unsupported file format: {self.data_path.suffix}")
+            raise ValueError(f"Unsupported file format: {self.data_path=}")
             
         return samples
     
@@ -212,9 +213,10 @@ class WanVideoDataset(BaseDataset):
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Get a single sample."""
-        real_idx = self.valid_indices[idx]
-        print(f"{idx=} {real_idx=}", flush=True)
-        sample = self.samples[real_idx]
+        # real_idx = self.valid_indices[idx]
+        # print(f"{idx=} {real_idx=}", flush=True)
+        # sample = self.samples[real_idx]
+        sample = self.samples[idx]
         
         # Load video frames
         video_path = sample['video']
