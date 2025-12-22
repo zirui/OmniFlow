@@ -1,9 +1,17 @@
 #!/bin/bash
 
-CONFIG="configs/wan2.2_t2v_5b.yml"
+# CONFIG="configs/wan2.2_t2v_5b.yml"
+CONFIG="configs/wan2.2_t2v_debug.yml"
+  --report_to none
 
 # Number of GPUs
 NGPUS=1
+
+export CUDA_VISIBLE_DEVICES=3
+export PYTHONPATH=/zirui/code/OmniFlow/src
+# export WANDB_DISABLED=1
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Training command
 torchrun --nproc_per_node=${NGPUS} \
@@ -11,5 +19,5 @@ torchrun --nproc_per_node=${NGPUS} \
   --node_rank=0 \
   --master_addr=127.0.0.1 \
   --master_port=12356 \
-  train.py --config ${CONFIG}
+  train.py --config ${CONFIG} \
 

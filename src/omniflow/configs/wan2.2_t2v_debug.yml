@@ -31,7 +31,7 @@ model_config:
   config:
     # DiT model parameters
     dit_hidden_size: 3072
-    dit_num_layers: 30
+    dit_num_layers: 10
     dit_num_heads: 24
     dit_intermediate_size: 14336
     dit_patch_size: [1, 2, 2]
@@ -51,6 +51,12 @@ model_config:
     require_vae_embedding: False
     fuse_vae_embedding_in_latents: True
     trainable_modules: 'dit'
+
+encoder:
+  # Checkpoint paths
+  t5_encoder: "/root/zirui/models/Wan2.1-T2V-14B/models_t5_umt5-xxl-enc-bf16.pth"
+  # autoencoder: "/root/zirui/models/Wan2.1-T2V-14B/Wan2.1_VAE.pth"
+  autoencoder: "/root/zirui/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
   
 # Training arguments
 trainer_args:
@@ -72,6 +78,7 @@ trainer_args:
   
   dataloader_num_workers: 4
 
+  report_to: none
   # use_wandb: false
   # wandb_project: t2v-debug
   # wandb_name: wan_i2v_14b
