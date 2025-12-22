@@ -20,8 +20,8 @@ A flexible training framework for multi-modality.
   - [ ] USP
 2. **Models**
    - [ ] hunyuan-video
-3. **Sparse Attention**
-    - [ ] FA2/FA3
+3. **Attention**
+    - [ ] FA2/FA3(aiter-FA-v3)
     - [ ] SSA
     - [ ] BSA
     - [ ] VSA
@@ -99,7 +99,20 @@ Prepare your video dataset in JSONL format:
 python train.py --config configs/wan2.2_t2v_5b.yaml
 
 
-# torchtitan
+# Run training based on torchtitan(currently need to manually add wan to torchtitan/experiments/__init__.py)
+
+# copy wan_torchtitan to torchtitan/experiments/wan
+# cp -r src/wan_torchtitan torchtitan/experiments/wan
+ln -s ../../../../src/wan_torchtitan third_party/torchtitan/torchtitan/experiments/wan
+
+
+# Add wan to torchtitan/experiments/__init__.py
+torchtitan/experiments/__init__.py
+ _supported_experiments = frozenset(
+-    ["flux", "simple_fsdp.llama3", "simple_fsdp.deepseek_v3", "vlm"]
++    ["flux", "simple_fsdp.llama3", "simple_fsdp.deepseek_v3", "vlm", "wan"]
+ )
+
 cd third_party/torchtitan && bash -x torchtitan/experiments/wan/run_train.sh
 ```
 
