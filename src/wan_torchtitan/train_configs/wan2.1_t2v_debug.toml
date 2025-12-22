@@ -15,7 +15,7 @@ save_tb_folder = "tb"
 enable_wandb = false
 
 [training]
-global_batch_size = 1
+# global_batch_size = 4
 # global_batch_size = 1
 local_batch_size = 1
 max_norm = 1.0

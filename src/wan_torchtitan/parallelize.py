@@ -110,36 +110,39 @@ def apply_fsdp_wan(
             fully_shard(block, **fsdp_config)
     
     # 2. Shard VAE Blocks (if trainable/heavy)
-    if hasattr(wan_model, "vae"):
-        # Recursively shard blocks if they exist.
-        # wan_video_vae.py has: Encoder3d -> downsamples (ResidualBlock/AttentionBlock), middle, head
+    # NOTE: zirui, Disabled because we use vae.encode() which bypasses FSDP's forward/pre-forward hooks
+    # for gathering parameters. This leads to mixed DTensor/Tensor errors.
+    # Since VAE is frozen and runs in no_grad, we can just replicate it (default behavior if not sharded).
+    # if hasattr(wan_model, "vae"):
+    #     # Recursively shard blocks if they exist.
+    #     # wan_video_vae.py has: Encoder3d -> downsamples (ResidualBlock/AttentionBlock), middle, head
         
-        # Helper to shard sequences
-        def shard_sequence(seq):
-            for layer in seq:
-                # Shard if it has parameters
-                if any(p.requires_grad for p in layer.parameters()) or True: # Shard even frozen for memory?
-                     pass
-                fully_shard(layer, **fsdp_config)
+    #     # Helper to shard sequences
+    #     def shard_sequence(seq):
+    #         for layer in seq:
+    #             # Shard if it has parameters
+    #             if any(p.requires_grad for p in layer.parameters()) or True: # Shard even frozen for memory?
+    #                  pass
+    #             fully_shard(layer, **fsdp_config)
         
-        # Check encoder
-        if hasattr(wan_model.vae, "encoder"):
-             # encoder has downsamples (Sequential), middle (Sequential)
-             if hasattr(wan_model.vae.encoder, "downsamples"):
-                 shard_sequence(wan_model.vae.encoder.downsamples)
-             if hasattr(wan_model.vae.encoder, "middle"):
-                 shard_sequence(wan_model.vae.encoder.middle)
-             fully_shard(wan_model.vae.encoder, **fsdp_config)
+    #     # Check encoder
+    #     if hasattr(wan_model.vae, "encoder"):
+    #          # encoder has downsamples (Sequential), middle (Sequential)
+    #          if hasattr(wan_model.vae.encoder, "downsamples"):
+    #              shard_sequence(wan_model.vae.encoder.downsamples)
+    #          if hasattr(wan_model.vae.encoder, "middle"):
+    #              shard_sequence(wan_model.vae.encoder.middle)
+    #          fully_shard(wan_model.vae.encoder, **fsdp_config)
              
-        # Check decoder
-        if hasattr(wan_model.vae, "decoder"):
-             if hasattr(wan_model.vae.decoder, "upsamples"):
-                 shard_sequence(wan_model.vae.decoder.upsamples)
-             if hasattr(wan_model.vae.decoder, "middle"):
-                 shard_sequence(wan_model.vae.decoder.middle)
-             fully_shard(wan_model.vae.decoder, **fsdp_config)
+    #     # Check decoder
+    #     if hasattr(wan_model.vae, "decoder"):
+    #          if hasattr(wan_model.vae.decoder, "upsamples"):
+    #              shard_sequence(wan_model.vae.decoder.upsamples)
+    #          if hasattr(wan_model.vae.decoder, "middle"):
+    #              shard_sequence(wan_model.vae.decoder.middle)
+    #          fully_shard(wan_model.vae.decoder, **fsdp_config)
              
-        fully_shard(wan_model.vae, **fsdp_config)
+    #     fully_shard(wan_model.vae, **fsdp_config)
 
     # 3. Shard Text Encoder (T5)
     if hasattr(wan_model, "text_encoder"):
