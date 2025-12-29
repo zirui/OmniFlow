@@ -57,7 +57,7 @@ class WanTrainer(Trainer):
         model = parallelize_wan(model, self.parallel_dims, job_config)
         
         # Move to device and init weights
-        model.to_empty(device=self.device)
+        model.to(device=self.device)
         
         # We can access model.module (if FSDP)
         if isinstance(model, torch.distributed.fsdp.FullyShardedDataParallel):

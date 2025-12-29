@@ -22,9 +22,6 @@ class WanVideoModel(nn.Module, ModelProtocol):
 
         wan_config = WanVideoConfig(**config_dict)
         self.model = WanVideoForConditionalGeneration(wan_config)
-        # # Cast the whole model (including DiT) to the same dtype as the checkpoints:
-        # if self.model_args.mixed_precision_param == "bfloat16":
-        #     self.model = self.model.to(torch.bfloat16)
 
         self.scheduler = FlowMatchScheduler(
             shift=5.0, sigma_min=0.0, extra_one_step=True
@@ -46,22 +43,15 @@ class WanVideoModel(nn.Module, ModelProtocol):
                     new_vae_state_dict[f"model.{k}"] = v
                 vae_state_dict = new_vae_state_dict
 
-            # TODO: zirui, needs to find a better way to load VAE weights to avoid  `non-meta paramete` warning
-            # self.model.vae.to_empty(device="cpu")
-            self.model.vae.load_state_dict(vae_state_dict, strict=True)
-            # self.model.vae.load_state_dict(vae_state_dict, strict=True, assign=True)
+            self.model.vae.load_state_dict(vae_state_dict, strict=True, assign=True)
             print("VAE loaded.")
 
         if self.model_args.t5_checkpoint_path:
             print(f"Loading T5 from {self.model_args.t5_checkpoint_path}")
-            # T5 might be saved as a full state dict or HF format.
-            # Assuming torch.save/load format for now based on .pth extension in user prompt.
             t5_state_dict = torch.load(
                 self.model_args.t5_checkpoint_path, map_location="cpu"
             )
-            # self.model.text_encoder.to_empty(device="cpu")
-            self.model.text_encoder.load_state_dict(t5_state_dict, strict=True)
-            # self.model.text_encoder.load_state_dict(t5_state_dict, strict=True, assign=True)
+            self.model.text_encoder.load_state_dict(t5_state_dict, strict=True, assign=True)
             print("T5 loaded.")
 
     def init_weights(self, buffer_device=None):
