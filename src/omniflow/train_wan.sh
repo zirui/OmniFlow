@@ -2,12 +2,12 @@
 
 # CONFIG="configs/wan2.2_t2v_5b.yml"
 CONFIG="configs/wan2.2_t2v_debug.yml"
-  --report_to none
+#--report_to none
 
 # Number of GPUs
-NGPUS=1
+NGPUS=4
 
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 export PYTHONPATH=/zirui/code/OmniFlow/src
 # export WANDB_DISABLED=1
 

@@ -14,7 +14,7 @@ wan_args = {
     "default": WanModelArgs(),
     "wan2.1_t2v_debug": WanModelArgs(
         dit_hidden_size=1536,
-        dit_num_layers=10,
+        dit_num_layers=4,
         dit_num_heads=12,
         dit_intermediate_size=8960,
         dit_in_channels=16,

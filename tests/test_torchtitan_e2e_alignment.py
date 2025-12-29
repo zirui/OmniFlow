@@ -69,7 +69,7 @@ class TestTorchtitanOmniFlowAlignment(unittest.TestCase):
             dit_in_channels=4,
             dit_out_channels=4,
             dit_intermediate_size=32,
-            dit_num_layers=1,
+            dit_num_layers=8,
             dit_num_heads=2,
             dit_text_dim=16,
             dit_freq_dim=64, # Important to match

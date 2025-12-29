@@ -15,6 +15,7 @@ from .configuration_wanvideo import WanVideoConfig
 from .wan_video_dit import WanDitModel, sinusoidal_embedding_1d
 from .wan_video_text_encoder import WanTextEncoder
 from .wan_video_vae import WanVideoVAE38, WanVideoVAE
+from ..debug_utils import print_tensor
 
 PATTERN = "B C H W"
 
@@ -175,106 +176,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             input_latents = torch.concat([vace_reference_latents, input_latents], dim=2)
         return input_latents
 
-    def embed_image_VAE(
-        self,
-        input_image,
-        end_image,
-        num_frames,
-        height,
-        width,
-        tiled,
-        tile_size,
-        tile_stride,
-    ):
-        image = repeat(input_image, f"H W C -> {PATTERN}", **({"B": 1} if "B" in PATTERN else {}))
-        msk = torch.ones(1, num_frames, height // 8, width // 8, device=self.device)
-        msk[:, 1:] = 0
-        if end_image is not None:
-            end_image = repeat(end_image, f"H W C -> {PATTERN}", **({"B": 1} if "B" in PATTERN else {}))
-            vae_input = torch.concat(
-                [
-                    image.transpose(0, 1),
-                    torch.zeros(3, num_frames - 2, height, width).to(image.device),
-                    end_image.transpose(0, 1),
-                ],
-                dim=1,
-            )
-            msk[:, -1:] = 1
-        else:
-            vae_input = torch.concat(
-                [
-                    image.transpose(0, 1),
-                    torch.zeros(3, num_frames - 1, height, width).to(image.device),
-                ],
-                dim=1,
-            )
-
-        msk = torch.concat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1)
-        msk = msk.view(1, msk.shape[1] // 4, 4, height // 8, width // 8)
-        msk = msk.transpose(1, 2)[0]
-
-        y = self.vae.encode(
-            [vae_input.to(dtype=self.dtype, device=self.device)],
-            device=self.device,
-            tiled=tiled,
-            tile_size=tile_size,
-            tile_stride=tile_stride,
-        )[0]
-        y = y.to(dtype=self.dtype, device=self.device)
-        y = torch.concat([msk, y])
-        y = y.unsqueeze(0)
-        y = y.to(dtype=self.dtype, device=self.device)
-        return y
-
-    def embed_image_CLIP(self, input_image, end_image, height, width):
-        if input_image.ndim == 4:  # (B, C, H, W)
-            image = input_image
-            # Assuming image_encoder.encode_image can handle batched tensor input
-            # If it expects list, we might need to adjust, but usually it's fine.
-            # WanTextEncoder/CLIP wrapper usually handles tensor.
-            clip_context = self.image_encoder.encode_image(image)
-        else:
-            image = repeat(input_image, f"H W C -> {PATTERN}", **({"B": 1} if "B" in PATTERN else {}))
-            clip_context = self.image_encoder.encode_image([image])
-
-        if end_image is not None:
-            if end_image.ndim == 4:
-                end_image_processed = end_image
-                end_feat = self.image_encoder.encode_image(end_image_processed)
-            else:
-                end_image_processed = repeat(end_image, f"H W C -> {PATTERN}", **({"B": 1} if "B" in PATTERN else {}))
-                end_feat = self.image_encoder.encode_image([end_image_processed])
-            
-            if self.dit.has_image_pos_emb:
-                clip_context = torch.concat([clip_context, end_feat], dim=1)
-                
-        clip_context = clip_context.to(dtype=self.dtype, device=self.device)
-        return clip_context
-
-    def embed_image_fused(self, input_image, latents, height, width, tiled, tile_size, tile_stride):
-        if input_image.ndim == 4: # (B, C, H, W)
-            image = repeat(input_image, "b c h w -> b c t h w", t=1)
-            # Pass directly as 'videos' (tensor) to vae.encode
-            z = self.vae.encode(
-                image,
-                device=self.device,
-                tiled=tiled,
-                tile_size=tile_size,
-                tile_stride=tile_stride,
-            )
-        else:
-            image = repeat(input_image, f"H W C -> C T H W", T=1)
-            z = self.vae.encode(
-                [image],
-                device=self.device,
-                tiled=tiled,
-                tile_size=tile_size,
-                tile_stride=tile_stride,
-            )
-        
-        latents[:, :, 0:1] = z
-        return latents, z
-
 
     def forward_preprocess(self, scheduler, data_inputs: dict[str, Any]):
         inputs = data_inputs
@@ -338,41 +239,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         context = self.encode_prompt(inputs["input_ids"], inputs["attention_mask"], device=self.device)
         inputs.update({"context": context})
 
-        if inputs["input_image"] is not None and self.require_vae_embedding:
-            y = self.embed_image_VAE(
-                inputs["input_image"],
-                inputs["end_image"],
-                num_frames,
-                height,
-                width,
-                inputs["tiled"],
-                inputs["tile_size"],
-                inputs["tile_stride"],
-            )
-            inputs.update({"y": y})
-
-        if (inputs["input_image"] is not None) and (self.image_encoder is not None) and self.require_clip_embedding:
-            clip_feature = self.embed_image_CLIP(inputs["input_image"], inputs["end_image"], height, width)
-            inputs.update({"clip_feature": clip_feature})
-
-        if inputs["input_image"] is not None and self.fuse_vae_embedding_in_latents:
-            latents, first_frame_latents = self.embed_image_fused(
-                inputs["input_image"],
-                inputs["latents"],
-                height,
-                width,
-                inputs["tiled"],
-                inputs["tile_size"],
-                inputs["tile_stride"],
-            )
-            inputs.update(
-                {
-                    "latents": latents,
-                    "fuse_vae_embedding_in_latents": True,
-                    "first_frame_latents": first_frame_latents,
-                }
-            )
-
         return inputs
 
     def forward(
@@ -389,65 +255,7 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         control_camera_latents_input: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> WanVideoOutput:
-        t = self.dit.time_embedding(
-            sinusoidal_embedding_1d(self.dit.freq_dim, timestep).to(device=self.dit.device, dtype=self.dit.dtype)
-        )
-        t_mod = self.dit.time_projection(t).unflatten(1, (6, self.dit.hidden_size))
-
-        context = self.dit.text_embedding(context)
-
-        x = latents
-        # Merged cfg
-        if x.shape[0] != context.shape[0]:
-            x = torch.concat([x] * context.shape[0], dim=0)
-        if timestep.shape[0] != context.shape[0]:
-            timestep = torch.concat([timestep] * context.shape[0], dim=0)
-
-        # Image Embedding
-        if y is not None and self.require_vae_embedding:
-            x = torch.cat([x, y], dim=1)
-
-        if clip_feature is not None and self.require_clip_embedding:
-            clip_embdding = self.dit.img_emb(clip_feature)
-            context = torch.cat([clip_embdding, context], dim=1)
-
-        # Add camera control
-        x, (f, h, w) = self.dit.patchify(x, control_camera_latents_input)
-
-        # Reference image
-        if reference_latents is not None:
-            if len(reference_latents.shape) == 5:  # video case
-                reference_latents = reference_latents[:, :, 0]  # only use the first frame
-            reference_latents = self.dit.ref_conv(reference_latents).flatten(2).transpose(1, 2)
-            x = torch.concat([reference_latents, x], dim=1)
-            f += 1
-
-        freqs = (
-            torch.cat(
-                [
-                    self.dit.freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-                    self.dit.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-                    self.dit.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
-                ],
-                dim=-1,
-            )
-            .reshape(f * h * w, 1, -1)
-            .to(x.device)
-        )
-
-
-        for block_id, block in enumerate(self.dit.blocks):
-            x = block(x, context, t_mod, freqs)
-
-        x = self.dit.head(x, t)
-        # Remove reference latents
-        if (
-            reference_latents is not None
-        ):  # since we replace the first frame with the reference image, we need to remove the first frame
-            x = x[:, reference_latents.shape[1] :]
-            f -= 1
-        x = self.dit.unpatchify(x, (f, h, w))
-
+        x = self.dit(latents, timestep, context)
         return WanVideoOutput(
             noise_pred=x,
             text_embeddings=context,

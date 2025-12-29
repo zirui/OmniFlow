@@ -7,6 +7,7 @@
 from typing import Optional
 
 import torch
+torch.manual_seed(0)
 import torch.nn as nn
 
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
@@ -49,7 +50,6 @@ class WanTrainer(Trainer):
                 torch.cuda.empty_cache()
 
         logger.info(f"Building custom Wan model...")
-        
         with utils.set_default_dtype(self._dtype):
              model = WanVideoModel(model_args)
         

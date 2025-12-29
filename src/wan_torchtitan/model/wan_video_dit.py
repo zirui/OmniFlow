@@ -12,6 +12,8 @@ from transformers.utils import TransformersKwargs, can_return_tuple, logging
 
 from .configuration_wanvideo import WanVideoConfig
 
+from ..debug_utils import print_tensor
+
 logger = logging.get_logger(__name__)
 
 # Try to import flash attention
@@ -453,15 +455,16 @@ class WanDitModel(PreTrainedModel):
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
         **kwargs,
-    ):
-        t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep))
+    ):  
+        t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep).to(dtype=x.dtype, device=x.device))
         t_mod = self.time_projection(t).unflatten(1, (6, self.hidden_size))
         context = self.text_embedding(context)  # self.text_embedding is an adapter.
-
-        if self.has_image_input:
-            x = torch.cat([x, y], dim=1)  # (b, c_x + c_y, f, h, w)
-            clip_embdding = self.img_emb(clip_feature)
-            context = torch.cat([clip_embdding, context], dim=1)
+        
+        # Merged cfg
+        if x.shape[0] != context.shape[0]:
+            x = torch.concat([x] * context.shape[0], dim=0)
+        if timestep.shape[0] != context.shape[0]:
+            timestep = torch.concat([timestep] * context.shape[0], dim=0)
 
         x, (f, h, w) = self.patchify(x)
 

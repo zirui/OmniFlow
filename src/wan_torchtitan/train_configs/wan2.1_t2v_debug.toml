@@ -15,14 +15,13 @@ save_tb_folder = "tb"
 enable_wandb = false
 
 [training]
-# global_batch_size = 4
-# global_batch_size = 1
-# local_batch_size = 1
 local_batch_size = 2
 max_norm = 1.0
 mixed_precision_param = "bfloat16"
-steps = 10000
+steps = 20
 enable_cpu_offload = false
+seed = 0
+deterministic = true
 
 # dataset = "/root/zirui/data/example_video_dataset/metadata.jsonl"
 # dataset = "example_video"
@@ -43,7 +42,7 @@ eps = 1e-8
 
 [lr_scheduler]
 decay_type = "cosine"
-warmup_steps = 1000
+warmup_steps = 100
 
 [parallelism]
 data_parallel_replicate_degree = 1
@@ -55,8 +54,8 @@ pipeline_parallel_degree = 1
 mode = "full"
 
 [checkpoint]
-enable = true
-interval = 100
+enable = false
+interval = 30
 export_dtype = "float32"
 
 [validation]
