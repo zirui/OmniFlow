@@ -39,6 +39,7 @@ class WanModelArgs(BaseModelArgs):
             self.mixed_precision_param = job_config.encoder.mixed_precision_param if hasattr(job_config.encoder, 'mixed_precision_param') else self.mixed_precision_param
             self.vae_checkpoint_path = job_config.encoder.vae_checkpoint_path
             self.vae_type = job_config.encoder.vae_type
+            self.t5_checkpoint_path = job_config.encoder.t5_checkpoint_path
 
     def get_nparams_and_flops(self, model, seq_len: int) -> tuple[int, float]:
         # Calculate params
