@@ -51,6 +51,8 @@ model_config:
     require_vae_embedding: False
     fuse_vae_embedding_in_latents: True
     trainable_modules: 'dit'
+    vae_type: wan_video_vae_38
+
 
 encoder:
   # Checkpoint paths
@@ -62,8 +64,8 @@ encoder:
 trainer_args:
   output_dir: "./output/wan2.2_ti2v_5b"
   num_train_epochs: 10000 # you dont have to set it like this, just for demo
-  per_device_train_batch_size: 1
-  per_device_eval_batch_size: 1
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
   gradient_accumulation_steps: 4  # Higher for 14B model
   # gradient_checkpointing: true
   

@@ -12,7 +12,7 @@ from transformers import Trainer as HFTrainer
 from transformers import TrainerCallback
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
-from .scheduler import FlowMatchScheduler
+from schedulers.flow_match import FlowMatchScheduler
 
 
 class WanVideoCallback(TrainerCallback):
@@ -61,7 +61,14 @@ class WanVideoTrainer(HFTrainer):
             Loss tensor
         """
         pixel_values = inputs.get("video")
-        num_frames, height, width = pixel_values.shape[:3]
+        # print(f"[DEBUG]{pixel_values.shape=}")
+        # "video": pixel_values.squeeze(0),  # T, H, W, C
+        if pixel_values.ndim == 5:
+            #  [B, C, T, H, W]
+            num_frames, height, width = pixel_values.shape[2:5]
+        else:
+            # [T, H, W, C]
+            num_frames, height, width = pixel_values.shape[:3]
         
         # Prepare inputs dict for model
         inputs_dict = {
@@ -71,7 +78,8 @@ class WanVideoTrainer(HFTrainer):
             "height": height,
             "width": width,
             "num_frames": num_frames,
-            "input_image": pixel_values[0],
+            # "input_image": pixel_values[:, 0] if pixel_values.ndim == 5 else pixel_values[0],
+            "input_image": pixel_values.select(2, 0) if pixel_values.ndim == 5 else pixel_values[0],
             "cfg_scale": inputs.get("cfg_scale", 1),
             "cfg_merge": inputs.get("cfg_merge", False),
             "vace_scale": inputs.get("vace_scale", 1),
@@ -139,5 +147,4 @@ class WanVideoTrainer(HFTrainer):
         noise_pred = output.noise_pred
         loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float(), reduction="mean")
         loss = loss * self.scheduler.training_weight(timestep)
-
         return loss

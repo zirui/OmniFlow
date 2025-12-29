@@ -14,6 +14,7 @@ class WanModelArgs(BaseModelArgs):
     dit_patch_size: List[int] = field(default_factory=lambda: [1, 2, 2])
     dit_in_channels: int = 48
     dit_out_channels: int = 48
+
     dit_freq_dim: int = 256
     dit_text_dim: int = 4096
     dit_eps: float = 1.0e-6
@@ -29,11 +30,15 @@ class WanModelArgs(BaseModelArgs):
     trainable_modules: str = "dit"
     t5_checkpoint_path: str = None
     vae_checkpoint_path: str = None
+    vae_type: str = "wan_video_vae_38"
+    mixed_precision_param: str = "float32"  # can be "float32" or "bfloat16"
 
     def update_from_config(self, job_config, **kwargs) -> None:
         # Update args from job_config if needed.
-        # For now, we assume args are set via initial dict or defaults.
-        pass
+        if hasattr(job_config, "encoder"):
+            self.mixed_precision_param = job_config.encoder.mixed_precision_param if hasattr(job_config.encoder, 'mixed_precision_param') else self.mixed_precision_param
+            self.vae_checkpoint_path = job_config.encoder.vae_checkpoint_path
+            self.vae_type = job_config.encoder.vae_type
 
     def get_nparams_and_flops(self, model, seq_len: int) -> tuple[int, float]:
         # Calculate params

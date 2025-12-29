@@ -10,7 +10,6 @@ from .model.wan_video_scheduler import FlowMatchScheduler
 class WanVideoModel(nn.Module, ModelProtocol):
     def __init__(self, model_args: WanModelArgs):
         super().__init__()
-        # nn.Module.__init__(self)
 
         self.model_args = model_args
 
@@ -23,7 +22,9 @@ class WanVideoModel(nn.Module, ModelProtocol):
 
         wan_config = WanVideoConfig(**config_dict)
         self.model = WanVideoForConditionalGeneration(wan_config)
-
+        # # Cast the whole model (including DiT) to the same dtype as the checkpoints:
+        # if self.model_args.mixed_precision_param == "bfloat16":
+        #     self.model = self.model.to(torch.bfloat16)
 
         self.scheduler = FlowMatchScheduler(
             shift=5.0, sigma_min=0.0, extra_one_step=True
@@ -36,7 +37,19 @@ class WanVideoModel(nn.Module, ModelProtocol):
             vae_state_dict = torch.load(
                 self.model_args.vae_checkpoint_path, map_location="cpu"
             )
+            
+            # Check if we need to add 'model.' prefix
+            if "model.encoder.conv1.weight" not in vae_state_dict and "encoder.conv1.weight" in vae_state_dict:
+                print("Detected missing 'model.' prefix in VAE checkpoint. Adding it...")
+                new_vae_state_dict = {}
+                for k, v in vae_state_dict.items():
+                    new_vae_state_dict[f"model.{k}"] = v
+                vae_state_dict = new_vae_state_dict
+
+            # TODO: zirui, needs to find a better way to load VAE weights to avoid  `non-meta paramete` warning
+            # self.model.vae.to_empty(device="cpu")
             self.model.vae.load_state_dict(vae_state_dict, strict=True)
+            # self.model.vae.load_state_dict(vae_state_dict, strict=True, assign=True)
             print("VAE loaded.")
 
         if self.model_args.t5_checkpoint_path:
@@ -46,7 +59,9 @@ class WanVideoModel(nn.Module, ModelProtocol):
             t5_state_dict = torch.load(
                 self.model_args.t5_checkpoint_path, map_location="cpu"
             )
+            # self.model.text_encoder.to_empty(device="cpu")
             self.model.text_encoder.load_state_dict(t5_state_dict, strict=True)
+            # self.model.text_encoder.load_state_dict(t5_state_dict, strict=True, assign=True)
             print("T5 loaded.")
 
     def init_weights(self, buffer_device=None):
@@ -66,6 +81,7 @@ class WanVideoModel(nn.Module, ModelProtocol):
         device = video.device
 
         # Add missing keys with defaults if not present
+        # [B, C, F, H, W]
         defaults = {
             "input_ids": None,
             "attention_mask": None,
@@ -86,16 +102,23 @@ class WanVideoModel(nn.Module, ModelProtocol):
             "motion_bucket_id": None,
             "vace_video": None,
             "vace_video_mask": None,
-            "input_image": video[0] if video.ndim > 1 else None,  # simplified
+            # "input_image": video[:, 0] if video.ndim == 5 else video[0],
+            "input_image": video.select(2, 0) if video.ndim == 5 else video[0],
         }
         for k, v in defaults.items():
             inputs_dict.setdefault(k, v)
 
         # Recover height/width/num_frames
         if "height" not in inputs_dict:
-            inputs_dict["num_frames"], inputs_dict["height"], inputs_dict["width"] = (
-                video.shape[:3]
-            )
+            if video.ndim == 5:
+                # [B, C, F, H, W]
+                inputs_dict["num_frames"], inputs_dict["height"], inputs_dict["width"] = (
+                    video.shape[2:5]
+                )
+            else:
+                inputs_dict["num_frames"], inputs_dict["height"], inputs_dict["width"] = (
+                    video.shape[:3]
+                )
 
         # Sample random timestep
         max_timestep_boundary = int(1 * self.scheduler.num_train_timesteps)

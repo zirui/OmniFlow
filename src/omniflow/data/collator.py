@@ -26,7 +26,6 @@ class VisionCollator:
             for key, values in instance.items():
                 inputs[key].append(values)
 
-        # print(f"{self.processor=}")
         batched_inputs = {}
         if "input_ids" in inputs.keys():
             input_ids = inputs.pop("input_ids")
@@ -59,7 +58,17 @@ class VisionCollator:
             ):
                 batched_inputs[key] = values[0]
             else:
-                batched_inputs[key] = torch.concatenate(values, dim=0)
+                batched_inputs[key] = torch.stack(values, dim=0)
+                if key == "video" and batched_inputs[key].ndim == 5:
+                    tensor = batched_inputs[key]
+                    # Target: (B, C, T, H, W)
+                    if tensor.shape[4] == 3: # (B, T, H, W, C)
+                        #  print("DEBUG: Permuting Path A (Last Dim 3)")
+                         tensor = tensor.permute(0, 4, 1, 2, 3).contiguous()
+                    elif tensor.shape[2] == 3: # (B, T, C, H, W)
+                        #  print("DEBUG: Permuting Path B (Dim 2 is 3)")
+                         tensor = tensor.permute(0, 2, 1, 3, 4).contiguous()
+                    batched_inputs[key] = tensor
         return batched_inputs
 
     @property

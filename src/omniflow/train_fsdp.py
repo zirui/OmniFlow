@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from models import WanVideoForConditionalGeneration, WanVideoConfig
 from data import WanVideoDataset, WanVideoDataProcessor, DatasetConfig
-from training.scheduler import FlowMatchScheduler
+from schedulers.flow_match_scheduler import FlowMatchScheduler
 from loguru import logger
 
 def load_config(config_path: str) -> dict:

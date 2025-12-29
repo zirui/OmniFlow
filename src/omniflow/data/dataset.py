@@ -19,10 +19,6 @@ from omniflow.utils import fetch_video
 
 from .collator import VisionCollator
 
-# class WanVideoDataCollator(VisionCollator):
-#     def __init__(self, processor):
-#         super().__init__(processor)
-
 
 class BaseDataset(Dataset):
     # def __init__(self, config: DatasetConfig) -> None:
@@ -38,11 +34,8 @@ class BaseDataset(Dataset):
         # if isinstance(self.processor_config, dict):
         #     self.processor_config = ProcessorConfig(**self.processor_config)
         self.samples = []
-        # self.skip = set([19, 20])
-        # self.valid_indices = [i for i in range(len(self.samples)) if i not in self.skip]
 
     def __len__(self):
-        # return len(self.valid_indices)
         return len(self.samples)
 
     def build(self):
@@ -71,7 +64,6 @@ class WanVideoDataset(BaseDataset):
     
     def __init__(
         self,
-        data_path: str,
         processor,
         config={}
     ):
@@ -79,21 +71,16 @@ class WanVideoDataset(BaseDataset):
         Initialize WanVideo dataset.
         
         Args:
-            data_path: Path to JSONL or CSV metadata file
             processor: WanVideoDataProcessor instance
-            frame_num: Number of frames to sample from each video
             video_backend: Backend for video loading ('qwen_vl_utils' or 'decord')
         """
         super().__init__(config)
         self.config = config
-        self.data_path = Path(data_path)
+        self.data_path = Path(self.config.dataset_path)
         self.processor = processor
         
         # Load metadata
         self.samples = self._load_metadata()
-        
-        # Initialize valid_indices after loading samples
-        # self.valid_indices = [i for i in range(len(self.samples)) if i not in self.skip]
         
     def _load_metadata(self) -> List[Dict]:
         """Load metadata from JSONL or CSV file."""
@@ -142,8 +129,6 @@ class WanVideoDataset(BaseDataset):
         Returns:
             Tuple of (video frames, sample fps)
         """
-        print(f"{video_path=}", flush=True)
-
         if isinstance(video_path, str) or isinstance(video_path, BytesIO):
             vr = VideoReader(video_path, ctx=cpu(0), num_threads=1)
         elif isinstance(video_path, list):
@@ -188,7 +173,7 @@ class WanVideoDataset(BaseDataset):
             "max_frames": self.config.video_max_frames,
             "min_pixels": self.config.video_min_pixels,
         }
-        print(f"{video_dict=}", flush=True)
+        # print(f"{video_dict=}", flush=True)
 
         if self.config.video_sampling_strategy == "frame_num":
             is_even = self.config.frame_num % 2 == 0
@@ -213,9 +198,6 @@ class WanVideoDataset(BaseDataset):
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Get a single sample."""
-        # real_idx = self.valid_indices[idx]
-        # print(f"{idx=} {real_idx=}", flush=True)
-        # sample = self.samples[real_idx]
         sample = self.samples[idx]
         
         # Load video frames
@@ -247,3 +229,18 @@ class WanVideoDataset(BaseDataset):
 
     def get_collator(self):
         return VisionCollator(self.processor)
+
+
+def build_dataset(config):
+    dataset = WanVideoDataset(config)
+    return dataset
+
+
+def build_dataloader(dataset, config):
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        num_workers=config.num_workers,
+    )
+    return dataloader

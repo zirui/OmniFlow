@@ -28,6 +28,7 @@ class Encoder:
     vae_checkpoint_path: str = (
         "torchtitan/experiments/wan/assets/autoencoder/Wan2.1_VAE.pth"
     )
+    vae_type: str = "wan_video_vae_38"
     # """Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file."""
     # max_t5_encoding_len: int = 256
     # """Maximum length of the T5 encoding."""

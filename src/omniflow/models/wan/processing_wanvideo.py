@@ -7,7 +7,6 @@ from PIL import Image
 from transformers import AutoTokenizer
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.image_utils import ImageInput
-from transformers.processing_utils import ProcessorMixin
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import TensorType, logging
 

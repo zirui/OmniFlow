@@ -138,7 +138,7 @@ def build_wan_dataloader(
     # processor.build()
 
     # dataset_cfg = DatasetConfig(
-    #     dataset_type="vision",
+    #     dataset_type="vision"
     #     dataset_format="jsonl",
     #     data_folder="None",
     #     dataset_path=dataset_path,
@@ -154,7 +154,7 @@ def build_wan_dataloader(
     dataset_path, processor, dataset_cfg = get_dataset_by_name(dataset_name)
 
     dataset = WanVideoDataset(
-        data_path=dataset_path, processor=processor, config=dataset_cfg
+        processor=processor, config=dataset_cfg
     )
     dataset.build()
 

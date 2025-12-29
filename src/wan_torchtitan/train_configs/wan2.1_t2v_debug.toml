@@ -17,7 +17,8 @@ enable_wandb = false
 [training]
 # global_batch_size = 4
 # global_batch_size = 1
-local_batch_size = 1
+# local_batch_size = 1
+local_batch_size = 2
 max_norm = 1.0
 mixed_precision_param = "bfloat16"
 steps = 10000
@@ -31,9 +32,9 @@ dataset = "vidgen-1m"
 # t5_encoder = "google/t5-v1_1-xxl"
 # clip_encoder = "openai/clip-vit-large-patch14"
 # max_t5_encoding_len = 256
-# autoencoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
 t5_checkpoint_path = "/root/zirui/models/Wan2.1-T2V-14B/models_t5_umt5-xxl-enc-bf16.pth"
 vae_checkpoint_path = "/root/zirui/models/Wan2.1-T2V-14B/Wan2.1_VAE.pth"
+vae_type = "wan_video_vae"
 
 [optimizer]
 name = "AdamW"

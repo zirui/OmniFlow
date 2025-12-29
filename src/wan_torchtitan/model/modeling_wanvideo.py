@@ -6,22 +6,15 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
-import logging
-logger = logging.getLogger(__name__)
+from loguru import logger
 from safetensors.torch import load_file
 from transformers import PreTrainedModel
-
-# from transformers.configuration_utils import PretrainedConfig
-# from transformers.modeling_utils import (
-#     SpecificPreTrainedModelType,
-#     restore_default_torch_dtype,
-# )
 from transformers.utils import ModelOutput
 
 from .configuration_wanvideo import WanVideoConfig
 from .wan_video_dit import WanDitModel, sinusoidal_embedding_1d
 from .wan_video_text_encoder import WanTextEncoder
-from .wan_video_vae import WanVideoVAE38
+from .wan_video_vae import WanVideoVAE38, WanVideoVAE
 
 PATTERN = "B C H W"
 
@@ -52,12 +45,16 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         self.config = config
         # Main DiT model
         self.dit = WanDitModel(config)
-        self.vae = WanVideoVAE38()
+        if config.vae_type == "wan_video_vae_38":
+            self.vae = WanVideoVAE38()
+        elif config.vae_type == "wan_video_vae":
+            self.vae = WanVideoVAE()
+        else:
+            raise ValueError(f"Unsupported vae_type: {config.vae_type}")
+            
         self.text_encoder = WanTextEncoder()
 
         self.image_encoder = None
-        self.motion_controller = None
-        self.vace = None
 
         self.seperated_timestep = config.seperated_timestep
         self.require_vae_embedding = config.require_vae_embedding
@@ -97,10 +94,15 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         min_value=-1,
         max_value=1,
     ):
-        # Transform a list of PIL.Image to torch.Tensor
+        # Support both list of frames (single video) and batch tensor inputs
+        if isinstance(video, torch.Tensor) and video.ndim == 5:
+            # Assume input shape is (B, C, T, H, W)
+            return video
+        # Original behavior for list of PIL images or tensors per frame
         video = [repeat(image, f"H W C -> {PATTERN}", **({"B": 1} if "B" in PATTERN else {})) for image in video]
         video = torch.stack(video, dim=pattern.index("T") // 2)
         return video
+
 
     def generate_noise(
         self,
@@ -140,12 +142,12 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
 
         return height, width, num_frames
 
-    def noise_initialize(self, height, width, num_frames, seed, rand_device, vace_reference_image):
+    def noise_initialize(self, height, width, num_frames, seed, rand_device, vace_reference_image, batch_size=1):
         length = (num_frames - 1) // 4 + 1
         if vace_reference_image is not None:
             length += 1
         shape = (
-            1,
+            batch_size,
             self.vae.model.z_dim,
             length,
             height // self.vae.upsampling_factor,
@@ -225,229 +227,54 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         return y
 
     def embed_image_CLIP(self, input_image, end_image, height, width):
-        image = repeat(input_image, f"H W C -> {PATTERN}", **({"B": 1} if "B" in PATTERN else {}))
-        clip_context = self.image_encoder.encode_image([image])
+        if input_image.ndim == 4:  # (B, C, H, W)
+            image = input_image
+            # Assuming image_encoder.encode_image can handle batched tensor input
+            # If it expects list, we might need to adjust, but usually it's fine.
+            # WanTextEncoder/CLIP wrapper usually handles tensor.
+            clip_context = self.image_encoder.encode_image(image)
+        else:
+            image = repeat(input_image, f"H W C -> {PATTERN}", **({"B": 1} if "B" in PATTERN else {}))
+            clip_context = self.image_encoder.encode_image([image])
+
         if end_image is not None:
-            end_image = repeat(end_image, f"H W C -> {PATTERN}", **({"B": 1} if "B" in PATTERN else {}))
+            if end_image.ndim == 4:
+                end_image_processed = end_image
+                end_feat = self.image_encoder.encode_image(end_image_processed)
+            else:
+                end_image_processed = repeat(end_image, f"H W C -> {PATTERN}", **({"B": 1} if "B" in PATTERN else {}))
+                end_feat = self.image_encoder.encode_image([end_image_processed])
+            
             if self.dit.has_image_pos_emb:
-                clip_context = torch.concat([clip_context, self.image_encoder.encode_image([end_image])], dim=1)
+                clip_context = torch.concat([clip_context, end_feat], dim=1)
+                
         clip_context = clip_context.to(dtype=self.dtype, device=self.device)
         return clip_context
 
     def embed_image_fused(self, input_image, latents, height, width, tiled, tile_size, tile_stride):
-        image = repeat(input_image, f"H W C -> C T H W", T=1)
-        z = self.vae.encode(
-            [image],
-            device=self.device,
-            tiled=tiled,
-            tile_size=tile_size,
-            tile_stride=tile_stride,
-        )
+        if input_image.ndim == 4: # (B, C, H, W)
+            image = repeat(input_image, "b c h w -> b c t h w", t=1)
+            # Pass directly as 'videos' (tensor) to vae.encode
+            z = self.vae.encode(
+                image,
+                device=self.device,
+                tiled=tiled,
+                tile_size=tile_size,
+                tile_stride=tile_stride,
+            )
+        else:
+            image = repeat(input_image, f"H W C -> C T H W", T=1)
+            z = self.vae.encode(
+                [image],
+                device=self.device,
+                tiled=tiled,
+                tile_size=tile_size,
+                tile_stride=tile_stride,
+            )
+        
         latents[:, :, 0:1] = z
         return latents, z
 
-    def fun_control(
-        self,
-        control_video,
-        num_frames,
-        height,
-        width,
-        tiled,
-        tile_size,
-        tile_stride,
-        clip_feature,
-        y,
-        latents,
-    ):
-        # self.load_models_to_device(self.onload_model_names)
-        control_video = self.preprocess_video(control_video)
-        control_latents = self.vae.encode(
-            control_video,
-            device=self.device,
-            tiled=tiled,
-            tile_size=tile_size,
-            tile_stride=tile_stride,
-        ).to(dtype=self.dtype, device=self.device)
-        control_latents = control_latents.to(dtype=self.dtype, device=self.device)
-        y_dim = self.dit.in_channels - control_latents.shape[1] - latents.shape[1]
-        if clip_feature is None or y is None:
-            clip_feature = torch.zeros((1, 257, 1280), dtype=self.dtype, device=self.device)
-            y = torch.zeros(
-                (1, y_dim, (num_frames - 1) // 4 + 1, height // 8, width // 8),
-                dtype=self.dtype,
-                device=self.device,
-            )
-        else:
-            y = y[:, -y_dim:]
-        y = torch.concat([control_latents, y], dim=1)
-        return clip_feature, y
-
-    def fun_reference(self, reference_image, height, width):
-        reference_image = reference_image
-        reference_latents = self.preprocess_video([reference_image])
-        reference_latents = self.vae.encode(reference_latents, device=self.device)
-        return reference_latents
-
-    def fun_camera_control(
-        self,
-        height,
-        width,
-        num_frames,
-        camera_control_direction,
-        camera_control_speed,
-        camera_control_origin,
-        latents,
-        input_image,
-        tiled,
-        tile_size,
-        tile_stride,
-    ):
-        camera_control_plucker_embedding = self.dit.control_adapter.process_camera_coordinates(
-            camera_control_direction,
-            num_frames,
-            height,
-            width,
-            camera_control_speed,
-            camera_control_origin,
-        )
-
-        control_camera_video = camera_control_plucker_embedding[:num_frames].permute([3, 0, 1, 2]).unsqueeze(0)
-        control_camera_latents = torch.concat(
-            [
-                torch.repeat_interleave(control_camera_video[:, :, 0:1], repeats=4, dim=2),
-                control_camera_video[:, :, 1:],
-            ],
-            dim=2,
-        ).transpose(1, 2)
-        b, f, c, h, w = control_camera_latents.shape
-        control_camera_latents = control_camera_latents.contiguous().view(b, f // 4, 4, c, h, w).transpose(2, 3)
-        control_camera_latents = control_camera_latents.contiguous().view(b, f // 4, c * 4, h, w).transpose(1, 2)
-        control_camera_latents_input = control_camera_latents.to(device=self.device, dtype=self.dtype)
-
-        input_image = input_image
-        input_latents = self.preprocess_video([input_image])
-        input_latents = self.vae.encode(input_latents, device=self.device)
-        y = torch.zeros_like(latents).to(self.device)
-        y[:, :, :1] = input_latents
-        y = y.to(dtype=self.dtype, device=self.device)
-
-        if y.shape[1] != self.dit.in_channels - latents.shape[1]:
-            image = repeat(
-                input_image,
-                f"H W C -> {PATTERN}",
-                **({"B": 1} if "B" in PATTERN else {}),
-            )
-            vae_input = torch.concat(
-                [
-                    image.transpose(0, 1),
-                    torch.zeros(3, num_frames - 1, height, width).to(image.device),
-                ],
-                dim=1,
-            )
-            y = self.vae.encode(
-                [vae_input.to(dtype=self.dtype, device=self.device)],
-                device=self.device,
-                tiled=tiled,
-                tile_size=tile_size,
-                tile_stride=tile_stride,
-            )[0]
-            y = y.to(dtype=self.dtype, device=self.device)
-            msk = torch.ones(1, num_frames, height // 8, width // 8, device=self.device)
-            msk[:, 1:] = 0
-            msk = torch.concat(
-                [torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]],
-                dim=1,
-            )
-            msk = msk.view(1, msk.shape[1] // 4, 4, height // 8, width // 8)
-            msk = msk.transpose(1, 2)[0]
-            y = torch.cat([msk, y])
-            y = y.unsqueeze(0)
-            y = y.to(dtype=self.dtype, device=self.device)
-        return control_camera_latents_input, y
-
-    def vace_call(
-        self,
-        vace_video,
-        vace_video_mask,
-        vace_reference_image,
-        vace_scale,
-        height,
-        width,
-        num_frames,
-        tiled,
-        tile_size,
-        tile_stride,
-    ):
-        if vace_video is not None or vace_video_mask is not None or vace_reference_image is not None:
-            self.load_models_to_device(["vae"])
-            if vace_video is None:
-                vace_video = torch.zeros(
-                    (1, 3, num_frames, height, width),
-                    dtype=self.dtype,
-                    device=self.device,
-                )
-            else:
-                vace_video = self.preprocess_video(vace_video)
-
-            if vace_video_mask is None:
-                vace_video_mask = torch.ones_like(vace_video)
-            else:
-                vace_video_mask = self.preprocess_video(vace_video_mask, min_value=0, max_value=1)
-
-            inactive = vace_video * (1 - vace_video_mask) + 0 * vace_video_mask
-            reactive = vace_video * vace_video_mask + 0 * (1 - vace_video_mask)
-            inactive = self.vae.encode(
-                inactive,
-                device=self.device,
-                tiled=tiled,
-                tile_size=tile_size,
-                tile_stride=tile_stride,
-            ).to(dtype=self.dtype, device=self.device)
-            reactive = self.vae.encode(
-                reactive,
-                device=self.device,
-                tiled=tiled,
-                tile_size=tile_size,
-                tile_stride=tile_stride,
-            ).to(dtype=self.dtype, device=self.device)
-            vace_video_latents = torch.concat((inactive, reactive), dim=1)
-
-            vace_mask_latents = rearrange(vace_video_mask[0, 0], "T (H P) (W Q) -> 1 (P Q) T H W", P=8, Q=8)
-            vace_mask_latents = F.interpolate(
-                vace_mask_latents,
-                size=(
-                    (vace_mask_latents.shape[2] + 3) // 4,
-                    vace_mask_latents.shape[3],
-                    vace_mask_latents.shape[4],
-                ),
-                mode="nearest-exact",
-            )
-
-            if vace_reference_image is None:
-                pass
-            else:
-                vace_reference_image = self.preprocess_video([vace_reference_image])
-                vace_reference_latents = self.vae.encode(
-                    vace_reference_image,
-                    device=self.device,
-                    tiled=tiled,
-                    tile_size=tile_size,
-                    tile_stride=tile_stride,
-                ).to(dtype=self.dtype, device=self.device)
-                vace_reference_latents = torch.concat(
-                    (vace_reference_latents, torch.zeros_like(vace_reference_latents)),
-                    dim=1,
-                )
-                vace_video_latents = torch.concat((vace_reference_latents, vace_video_latents), dim=2)
-                vace_mask_latents = torch.concat(
-                    (torch.zeros_like(vace_mask_latents[:, :, :1]), vace_mask_latents),
-                    dim=2,
-                )
-
-            vace_context = torch.concat((vace_video_latents, vace_mask_latents), dim=1)
-            return vace_context, vace_scale
-        else:
-            return None, vace_scale
 
     def forward_preprocess(self, scheduler, data_inputs: dict[str, Any]):
         inputs = data_inputs
@@ -455,6 +282,29 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             inputs["height"], inputs["width"], inputs["num_frames"]
         )
         inputs.update({"height": height, "width": width, "num_frames": num_frames})
+
+        if inputs.get("video") is not None and isinstance(inputs["video"], torch.Tensor):
+            vid = inputs["video"]
+            if vid.ndim == 5:
+                # (B, C, F, H, W)
+                if vid.shape[2] != num_frames or vid.shape[3] != height or vid.shape[4] != width:
+                    # vid.shape[2:] is (F, H, W)
+                    logger.info(f"Resizing input video tensor (5D) from {vid.shape[2:]} to {(num_frames, height, width)}")
+                    vid = torch.nn.functional.interpolate(vid, size=(num_frames, height, width), mode='trilinear', align_corners=False)
+                    inputs["video"] = vid
+            elif vid.ndim == 4:
+                # (F, H, W, C)
+                if vid.shape[0] != num_frames or vid.shape[1] != height or vid.shape[2] != width:
+                    logger.info(f"Resizing input video tensor (4D) from {vid.shape[:3]} to {(num_frames, height, width)}")
+                    vid = vid.permute(3, 0, 1, 2).unsqueeze(0) # (1, C, F, H, W)
+                    vid = torch.nn.functional.interpolate(vid, size=(num_frames, height, width), mode='trilinear', align_corners=False)
+                    inputs["video"] = vid.squeeze(0).permute(1, 2, 3, 0).contiguous()
+        batch_size = 1
+        if inputs.get("video") is not None and isinstance(inputs["video"], torch.Tensor) and inputs["video"].ndim == 5:
+             batch_size = inputs["video"].shape[0]
+        elif inputs.get("input_ids") is not None:
+             batch_size = inputs["input_ids"].shape[0]
+            
         noise = self.noise_initialize(
             inputs["height"],
             inputs["width"],
@@ -462,6 +312,7 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             inputs["seed"],
             self.device,
             inputs["vace_reference_image"],
+            batch_size=batch_size,
         )
         inputs.update({"noise": noise})
 
@@ -522,65 +373,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
                 }
             )
 
-        if inputs["control_video"] is not None:
-            clip_feature, y = self.fun_control(
-                inputs["control_video"],
-                num_frames,
-                height,
-                width,
-                inputs["tiled"],
-                inputs["tile_size"],
-                inputs["tile_stride"],
-                clip_feature,
-                y,
-                latents,
-            )
-            inputs.update({"clip_feature": clip_feature, "y": y})
-
-        if inputs["reference_image"] is not None:
-            reference_latents, clip_feature = self.fun_reference(inputs["reference_image"], height, width)
-            if self.image_encoder is not None:
-                clip_feature = repeat(
-                    inputs["reference_image"],
-                    f"H W C -> {PATTERN}",
-                    **({"B": 1} if "B" in PATTERN else {}),
-                )
-                clip_feature = self.image_encoder.encode_image([clip_feature])
-            inputs.update({"reference_latents": reference_latents, "clip_feature": clip_feature})
-
-        if inputs["camera_control_direction"] is not None:
-            control_camera_latents_input, y = self.fun_camera_control(
-                inputs["height"],
-                inputs["width"],
-                inputs["num_frames"],
-                inputs["camera_control_direction"],
-                inputs["camera_control_speed"],
-                inputs["camera_control_origin"],
-                latents,
-                inputs["input_image"],
-                inputs["tiled"],
-                inputs["tile_size"],
-                inputs["tile_stride"],
-            )
-            inputs.update({"control_camera_latents_input": control_camera_latents_input, "y": y})
-
-        if inputs["motion_bucket_id"] is not None:
-            motion_bucket_id = torch.Tensor((inputs["motion_bucket_id"],)).to(dtype=self.dtype, device=self.device)
-            inputs.update({"motion_bucket_id": motion_bucket_id})
-
-        vace_context, vace_scale = self.vace_call(
-            inputs["vace_video"],
-            inputs["vace_video_mask"],
-            inputs["vace_reference_image"],
-            inputs["vace_scale"],
-            inputs["height"],
-            inputs["width"],
-            inputs["num_frames"],
-            inputs["tiled"],
-            inputs["tile_size"],
-            inputs["tile_stride"],
-        )
-        inputs.update({"vace_context": vace_context, "vace_scale": vace_scale})
         return inputs
 
     def forward(
@@ -602,9 +394,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         )
         t_mod = self.dit.time_projection(t).unflatten(1, (6, self.dit.hidden_size))
 
-        # Motion Controller
-        if motion_bucket_id is not None and self.motion_controller is not None:
-            t_mod = t_mod + self.motion_controller(motion_bucket_id).unflatten(1, (6, self.dit.hidden_size))
         context = self.dit.text_embedding(context)
 
         x = latents
@@ -646,15 +435,9 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             .to(x.device)
         )
 
-        if vace_context is not None:
-            vace_hints = self.vace(x, vace_context, context, t_mod, freqs)
 
         for block_id, block in enumerate(self.dit.blocks):
             x = block(x, context, t_mod, freqs)
-
-            if vace_context is not None and block_id in self.vace.vace_layers_mapping:
-                current_vace_hint = vace_hints[self.vace.vace_layers_mapping[block_id]]
-                x = x + current_vace_hint * vace_scale
 
         x = self.dit.head(x, t)
         # Remove reference latents

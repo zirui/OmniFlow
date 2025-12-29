@@ -61,9 +61,11 @@ class WanVideoConfig(PretrainedConfig):
         require_vae_embedding: bool = False,
         fuse_vae_embedding_in_latents: bool = True,
         tie_word_embeddings: bool = False,
+        vae_type: str = "wan_video_vae_38",
         **kwargs,
     ):
         # DiT configuration
+        self.vae_type = vae_type
         self.dit_hidden_size = dit_hidden_size
         self.dit_num_layers = dit_num_layers
         self.dit_num_heads = dit_num_heads

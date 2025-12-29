@@ -62,7 +62,6 @@ def build_dataset(dataset_config: dict):
     logger.debug(f"{dataset_config=}")
     # Build dataset
     dataset = WanVideoDataset(
-        data_path=dataset_config['dataset_path'],
         processor=processor,
         config = DatasetConfig(**dataset_config)
     )
