@@ -4,9 +4,11 @@ import torch
 
 logger = logging.getLogger(__name__)
 def print_tensor(t : torch.Tensor, name : str):
-    logger.info("<------------{}".format(name))
+    print("<------------{}".format(name))
     if torch.is_tensor(t):
-        logger.info("shape={}, dtype={}, device={}, contiguous={}".format(t.shape, t.dtype, t.device, t.is_contiguous()))
+        print("shape={}, dtype={}, device={}, contiguous={}".format(t.shape, t.dtype, t.device, t.is_contiguous()))
+        flat = t.flatten()
+        print("value : {} ... {}".format(flat[:10], flat[-10:]))
     else:
-        logger.info("NOT A TENSOR")
-    logger.info("{}------------>".format(name))
+        print("NOT A TENSOR")
+    print("{}------------>\n".format(name), flush=True)

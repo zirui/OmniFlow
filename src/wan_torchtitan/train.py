@@ -25,10 +25,12 @@ from torchtitan.experiments.wan.wan_dataset import build_wan_dataloader
 from .model.modeling_wanvideo import WanVideoForConditionalGeneration
 from .model.wan_video_scheduler import FlowMatchScheduler
 from .model import WanVideoConfig
-
+from .debug_utils import print_tensor
 class WanTrainer(Trainer):
     def __init__(self, job_config: JobConfig):
         super().__init__(job_config)
+        model = self.model_parts[0]
+        print_tensor(model.time_embedding[0].weight, "model.dit.time_embedding[0]")
 
         logger.info(f"Building Wan Model using local experiment definition")
         self._dtype = (

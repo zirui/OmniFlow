@@ -12,6 +12,7 @@ from transformers.utils import TransformersKwargs, can_return_tuple, logging
 
 from .configuration_wanvideo import WanVideoConfig
 from torchtitan.protocols.model import ModelProtocol
+from torchtitan.experiments.wan.debug_utils import print_tensor
 
 logger = logging.get_logger(__name__)
 
@@ -446,12 +447,10 @@ class WanDitModel(PreTrainedModel, ModelProtocol):
         use_gradient_checkpointing_offload: bool = False,
         **kwargs,
     ):  
-        if self.freqs is None:
-            # TODO (limou)
-            # move to cuda
-            self.freqs = precompute_freqs_cis_3d(
-                dim=self.hidden_size // self.num_heads)
-            
+        print_tensor(x, "x")
+        print_tensor(timestep, "timestep")
+        print_tensor(context, "context")
+        print_tensor(self.time_embedding[0].weight, "time_embedding[0].weight")
         t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep).to(dtype=x.dtype, device=x.device))
         t_mod = self.time_projection(t).unflatten(1, (6, self.hidden_size))
         context = self.text_embedding(context)  # self.text_embedding is an adapter.
@@ -476,6 +475,7 @@ class WanDitModel(PreTrainedModel, ModelProtocol):
             .reshape(f * h * w, 1, -1)
             .to(x.device)
         )
+        print_tensor(freqs, "freqs")
 
         def create_custom_forward(module):
             def custom_forward(*inputs):
@@ -509,11 +509,63 @@ class WanDitModel(PreTrainedModel, ModelProtocol):
 
         x = self.head(x, t)
         x = self.unpatchify(x, (f, h, w))
+        print_tensor(x, "final_output")
         return x
 
     def init_weights(self, buffer_device=None):
-        """Initialize model weights."""
-        # TODO (limou)
-        # initialize weights for WanDitModel
-        logger.info("Initializing WanDitModel weights, buffer_device={}".format(buffer_device))
-        pass
+        """
+        Initialize model weights.
+        This follows HF / PyTorch conventions:
+        - Parameters are initialized
+        - Buffers are created but NOT moved to device here
+        """
+        logger.info(f"Initializing WanDitModel weights, buffer_device={buffer_device}")
+
+
+        for module in self.modules():
+
+            if hasattr(module, "reset_parameters"):
+                module.reset_parameters()
+                continue
+
+            # 1.2 Linear
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+            # 1.3 Conv
+            elif isinstance(module, (nn.Conv2d, nn.Conv3d)):
+                nn.init.kaiming_normal_(
+                    module.weight, mode="fan_out", nonlinearity="relu"
+                )
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+            # 1.4 LayerNorm
+            elif isinstance(module, nn.LayerNorm):
+                if module.elementwise_affine:
+                    nn.init.ones_(module.weight)
+                    nn.init.zeros_(module.bias)
+
+            # 1.5 Embedding（如果将来有）
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+        for name, param in self.named_parameters(recurse=False):
+            if param is None:
+                continue
+            if param.dim() > 1:
+                nn.init.xavier_uniform_(param)
+            else:
+                nn.init.zeros_(param)
+
+        if self.freqs is None:
+            freqs = precompute_freqs_cis_3d(
+                dim=self.hidden_size // self.num_heads
+            )
+            # freqs 是 tuple，不是 tensor parameter
+            if buffer_device is not None:
+                freqs = tuple(f.to(buffer_device) for f in freqs)
+            self.freqs = freqs
+            

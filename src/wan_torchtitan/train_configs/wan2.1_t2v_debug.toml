@@ -9,7 +9,7 @@ flavor = "wan2.1_t2v_debug"
 
 [metrics]
 log_freq = 1
-disable_color_printing = false
+disable_color_printing = true
 enable_tensorboard = false
 save_tb_folder = "tb"
 enable_wandb = false
@@ -18,7 +18,7 @@ enable_wandb = false
 local_batch_size = 2
 max_norm = 1.0
 mixed_precision_param = "bfloat16"
-steps = 20
+steps = 10
 enable_cpu_offload = false
 seed = 0
 deterministic = true
@@ -42,7 +42,7 @@ eps = 1e-8
 
 [lr_scheduler]
 decay_type = "cosine"
-warmup_steps = 10
+warmup_steps = 100
 
 [parallelism]
 data_parallel_replicate_degree = 1
