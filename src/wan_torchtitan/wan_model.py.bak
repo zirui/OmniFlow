@@ -68,8 +68,6 @@ class WanVideoModel(nn.Module, ModelProtocol):
         inputs_dict = {"video": video}
         inputs_dict.update(kwargs)
 
-        device = video.device
-
         # Add missing keys with defaults if not present
         # [B, C, F, H, W]
         defaults = {

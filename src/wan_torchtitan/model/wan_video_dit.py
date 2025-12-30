@@ -11,8 +11,7 @@ from transformers.modeling_outputs import BaseModelOutput
 from transformers.utils import TransformersKwargs, can_return_tuple, logging
 
 from .configuration_wanvideo import WanVideoConfig
-
-from ..debug_utils import print_tensor
+from torchtitan.protocols.model import ModelProtocol
 
 logger = logging.get_logger(__name__)
 
@@ -312,24 +311,9 @@ class Head(nn.Module):
         return x
 
 
-# class WanPreTrainedModel(PreTrainedModel):
-#     config: WanVideoConfig
-#     base_model_prefix = "model"
-#     supports_gradient_checkpointing = True
-#     _no_split_modules = ["DiTBlock"]
-#     # _skip_keys_device_placement = ["past_key_values"]
-#     _supports_flash_attn = True
-#     _supports_sdpa = True
-
-#     _can_compile_fullgraph = True
-#     _supports_attention_backend = True
-#     _can_record_outputs = {
-#         "hidden_states": DiTBlock,
-#         "attentions": SelfAttention,
-#     }
-
-
-class WanDitModel(PreTrainedModel):
+# TODO (limou)
+# check why need inherited from PreTrainedModel ?
+class WanDitModel(PreTrainedModel, ModelProtocol):
     config: WanVideoConfig
     base_model_prefix = "dit"
     supports_gradient_checkpointing = True
@@ -343,7 +327,13 @@ class WanDitModel(PreTrainedModel):
         "attentions": SelfAttention,
     }
 
-    def __init__(self, config: WanVideoConfig):
+    def __init__(self, model_args):
+        config_dict = {
+            k: v
+            for k, v in vars(model_args).items()
+            if k in WanVideoConfig.__annotations__ or k in WanVideoConfig().__dict__
+        }
+        config = WanVideoConfig(**config_dict)
         super().__init__(config)
         self.hidden_size = config.dit_hidden_size
         self.in_channels = config.dit_in_channels
@@ -366,7 +356,7 @@ class WanDitModel(PreTrainedModel):
         self.in_channels_control_adapter = config.dit_in_channels_control_adapter
 
         # build the WanDit model
-        self.freqs = precompute_freqs_cis_3d(head_dim)
+        self.freqs = None
         self.patch_embedding = nn.Conv3d(
             self.in_channels,
             self.hidden_size,
@@ -456,6 +446,12 @@ class WanDitModel(PreTrainedModel):
         use_gradient_checkpointing_offload: bool = False,
         **kwargs,
     ):  
+        if self.freqs is None:
+            # TODO (limou)
+            # move to cuda
+            self.freqs = precompute_freqs_cis_3d(
+                dim=self.hidden_size // self.num_heads)
+            
         t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep).to(dtype=x.dtype, device=x.device))
         t_mod = self.time_projection(t).unflatten(1, (6, self.hidden_size))
         context = self.text_embedding(context)  # self.text_embedding is an adapter.
@@ -514,3 +510,10 @@ class WanDitModel(PreTrainedModel):
         x = self.head(x, t)
         x = self.unpatchify(x, (f, h, w))
         return x
+
+    def init_weights(self, buffer_device=None):
+        """Initialize model weights."""
+        # TODO (limou)
+        # initialize weights for WanDitModel
+        logger.info("Initializing WanDitModel weights, buffer_device={}".format(buffer_device))
+        pass

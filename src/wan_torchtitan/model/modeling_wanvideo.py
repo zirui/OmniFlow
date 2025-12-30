@@ -44,8 +44,10 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
     def __init__(self, config: WanVideoConfig):
         super().__init__(config)
         self.config = config
+
         # Main DiT model
-        self.dit = WanDitModel(config)
+        # self.dit = WanDitModel(config)
+
         if config.vae_type == "wan_video_vae_38":
             self.vae = WanVideoVAE38()
         elif config.vae_type == "wan_video_vae":
@@ -261,6 +263,32 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             text_embeddings=context,
         )
 
+    def load_model(self, vae_ckpt_path, text_encoder_ckpt_path):
+        # Load pretrained weights for frozen components
+        if vae_ckpt_path:
+            print(f"Loading VAE from {vae_ckpt_path}")
+            vae_state_dict = torch.load(
+                vae_ckpt_path, map_location="cpu"
+            )
+            
+            # Check if we need to add 'model.' prefix
+            if "model.encoder.conv1.weight" not in vae_state_dict and "encoder.conv1.weight" in vae_state_dict:
+                print("Detected missing 'model.' prefix in VAE checkpoint. Adding it...")
+                new_vae_state_dict = {}
+                for k, v in vae_state_dict.items():
+                    new_vae_state_dict[f"model.{k}"] = v
+                vae_state_dict = new_vae_state_dict
+
+            self.vae.load_state_dict(vae_state_dict, strict=True, assign=True)
+            print("VAE loaded.")
+
+        if text_encoder_ckpt_path:
+            print(f"Loading T5 from {text_encoder_ckpt_path}")
+            t5_state_dict = torch.load(
+                text_encoder_ckpt_path, map_location="cpu"
+            )
+            self.text_encoder.load_state_dict(t5_state_dict, strict=True, assign=True)
+            print("T5 loaded.")
 
 __all__ = [
     "WanVideoForConditionalGeneration",

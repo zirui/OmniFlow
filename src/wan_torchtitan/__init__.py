@@ -3,7 +3,9 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 
 from .wan_args import WanModelArgs
-from .wan_model import WanVideoModel
+
+import os
+from .model.wan_video_dit import WanDitModel
 from .parallelize import parallelize_wan
 from .wan_dataset import build_wan_dataloader
 from .loss import build_wan_loss
@@ -57,7 +59,7 @@ wan_args = {
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        model_cls=WanVideoModel,
+        model_cls=WanDitModel,
         model_args=wan_args,
         parallelize_fn=parallelize_wan,
         pipelining_fn=None,  # Pipeline parallel not implemented yet

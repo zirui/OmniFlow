@@ -3,7 +3,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-
+import os
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -27,6 +27,10 @@ def parallelize_wan(
         parallel_dims: ParallelDims object
         job_config: JobConfig object
     """
+
+    # TODO (limou)
+    # enable FSDP for Wan model components
+    return model
     
     # TODO: zirui, Check if we should freeze components
     if hasattr(model, "freeze_except"):
@@ -67,7 +71,8 @@ def apply_ac(model: nn.Module, ac_config):
     )
 
     # WanVideoModel -> .model (WanVideoForConditionalGeneration) -> .model (WanDitModel) -> .blocks
-    wan_dit = model.model.dit
+    # wan_dit = model.model.dit
+    wan_dit = model
     
     if hasattr(wan_dit, "blocks"):
         for layer_id, block in wan_dit.blocks.named_children():
@@ -101,7 +106,8 @@ def apply_fsdp_wan(
     #    -> .encoder, .decoder -> blocks
     # -> .model (WanDitModel) -> .blocks (DiTBlock)
     
-    wan_model = model.model # WanVideoForConditionalGeneration
+    # wan_model = model.model # WanVideoForConditionalGeneration
+    wan_model = model
     
     # 1. Shard DiT Blocks
     # WanDitModel is wan_model.model

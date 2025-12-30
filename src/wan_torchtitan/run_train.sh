@@ -12,7 +12,7 @@ echo "PYTHONPATH : ${PYTHONPATH}"
 
 # Distributed args
 NNODES=1
-NPROC_PER_NODE=4  # Set to 8 for full node, 1 for debug
+NPROC_PER_NODE=1  # Set to 8 for full node, 1 for debug
 MASTER_ADDR="localhost"
 MASTER_PORT="27500"
 
@@ -20,6 +20,7 @@ CONFIG_FILE="torchtitan/experiments/wan/train_configs/wan2.1_t2v_debug.toml"
 
 export CUDA_VISIBLE_DEVICES=4,5,6,7
 export PYTORCH_ALLOC_CONF=expandable_segments:True
+export PYTHONUNBUFFERED=1
 echo "Starting training with config: $CONFIG_FILE"
 
 
@@ -30,5 +31,5 @@ torchrun \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
     --rdzv_backend=c10d \
     --local_ranks_filter=0 --role=rank --tee=3 \
-    torchtitan/experiments/wan/train.py \
+    -m torchtitan.experiments.wan.train \
     --job.config_file ${CONFIG_FILE}
