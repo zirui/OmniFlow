@@ -51,7 +51,11 @@ class WanTrainer(Trainer):
         logger.info(f"Building custom Wan model...")
         
         with utils.set_default_dtype(self._dtype):
-             model = WanVideoModel(model_args)
+             pretrained_path = job_config.training.load_from_pretrained_path
+             if pretrained_path:
+                 model = WanVideoModel(model_args, pretrained_dit_path=pretrained_path)
+             else:
+                 model = WanVideoModel(model_args)
         
         # Parallelize
         model = parallelize_wan(model, self.parallel_dims, job_config)

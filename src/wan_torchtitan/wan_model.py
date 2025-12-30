@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torchtitan.protocols.model import ModelProtocol
+from typing import Optional
 
 from .wan_args import WanModelArgs
 from .model import WanVideoForConditionalGeneration, WanVideoConfig
@@ -8,26 +9,37 @@ from .model.wan_video_scheduler import FlowMatchScheduler
 
 
 class WanVideoModel(nn.Module, ModelProtocol):
-    def __init__(self, model_args: WanModelArgs):
+    def __init__(self, model_args: WanModelArgs, pretrained_dit_path: Optional[str] = None):
         super().__init__()
 
         self.model_args = model_args
 
-        # Convert WanModelArgs to WanVideoConfig
-        config_dict = {
-            k: v
-            for k, v in vars(model_args).items()
-            if k in WanVideoConfig.__annotations__ or k in WanVideoConfig().__dict__
-        }
+        if pretrained_dit_path:
+             print(f"Loading custom DiT from {pretrained_dit_path}")
+             # Pass vae_type etc from model_args
+             self.model = WanVideoForConditionalGeneration.load_dit(
+                 pretrained_dit_path, 
+                 vae_type=model_args.vae_type
+             )
+        else:
+            # Convert WanModelArgs to WanVideoConfig
+            config_dict = {
+                k: v
+                for k, v in vars(model_args).items()
+                if k in WanVideoConfig.__annotations__ or k in WanVideoConfig().__dict__
+            }
 
-        wan_config = WanVideoConfig(**config_dict)
-        self.model = WanVideoForConditionalGeneration(wan_config)
+            wan_config = WanVideoConfig(**config_dict)
+            self.model = WanVideoForConditionalGeneration(wan_config)
 
         self.scheduler = FlowMatchScheduler(
             shift=5.0, sigma_min=0.0, extra_one_step=True
         )
         self.scheduler.set_timesteps(1000, training=True)
 
+        self._load_auxiliary_models()
+
+    def _load_auxiliary_models(self):
         # Load pretrained weights for frozen components
         if self.model_args.vae_checkpoint_path:
             print(f"Loading VAE from {self.model_args.vae_checkpoint_path}")

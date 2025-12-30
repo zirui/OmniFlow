@@ -1,12 +1,13 @@
 import os
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Optional 
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 from loguru import logger
+import json
+import glob
 from safetensors.torch import load_file
 from transformers import PreTrainedModel
 from transformers.utils import ModelOutput
@@ -452,6 +453,117 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             noise_pred=x,
             text_embeddings=context,
         )
+
+
+
+    @classmethod
+    def load_dit(cls, pretrained_path, device="cpu", dtype=None, **kwargs):
+        """
+        Load a DiT-only checkpoint from a directory or file.
+        Arguments:
+            pretrained_path: Path to the directory containing config.json and diffusion_pytorch_model.safetensors, 
+                           or path to the safetensors file directly (assuming config.json is in the same dir).
+            device: Device to load the model to.
+            dtype: Dtype to load the model to.
+            kwargs: Additional arguments to override the config (e.g. vae_type, trainable_modules).
+        """
+        
+        pretrained_path = str(pretrained_path)
+        weight_files = []
+        
+        if os.path.isfile(pretrained_path):
+            if pretrained_path.endswith(".safetensors") or pretrained_path.endswith(".bin"):
+                weight_files = [pretrained_path]
+                config_path = os.path.join(os.path.dirname(pretrained_path), "config.json")
+            else:
+                 raise ValueError(f"Unsupported file type: {pretrained_path}")
+        else:
+            # We look for files matching *model*.safetensors or *model*.bin in directory
+            safetensor_files = sorted(glob.glob(os.path.join(pretrained_path, "*model*.safetensors")))
+            if safetensor_files:
+                weight_files = safetensor_files
+            else:
+                bin_files = sorted(glob.glob(os.path.join(pretrained_path, "*model*.bin")))
+                if bin_files:
+                    weight_files = bin_files
+            
+            config_path = os.path.join(pretrained_path, "config.json")
+            
+        if not os.path.exists(config_path):
+            raise ValueError(f"Config file not found: {config_path}")
+            
+        if not weight_files:
+             raise ValueError(f"No checkpoint files found in {pretrained_path}")
+
+        # 1. Load config
+        with open(config_path, 'r') as f:
+            config_dict = json.load(f)
+            
+        # 2. Convert config
+        wan_config_kwargs = {}
+        
+        # Direct mapping attempt
+        key_map = {
+            "dim": "dit_hidden_size",
+            "num_layers": "dit_num_layers",
+            "num_heads": "dit_num_heads",
+            "ffn_dim": "dit_intermediate_size",
+            "in_dim": "dit_in_channels",
+            "out_dim": "dit_out_channels",
+            "freq_dim": "dit_freq_dim",
+            "text_len": "text_len", 
+        }
+        
+        for k, v in config_dict.items():
+            if k in key_map:
+                wan_config_kwargs[key_map[k]] = v
+        
+        if "patch_size" in config_dict:
+             wan_config_kwargs["dit_patch_size"] = tuple(config_dict["patch_size"])
+             
+        # Merge kwargs (overrides)
+        for k, v in kwargs.items():
+            wan_config_kwargs[k] = v
+
+        # Create WanVideoConfig
+        config = WanVideoConfig(**wan_config_kwargs)
+        
+        # 3. Initialize Model
+        logger.info(f"Initializing WanVideoForConditionalGeneration with config: {config}")
+        model = cls(config)
+        
+        # 4. Load Weights (Supports sharded)
+        state_dict = {}
+        for ckpt_path in weight_files:
+            logger.info(f"Loading weights from {ckpt_path}")
+            if ckpt_path.endswith(".safetensors"):
+                part_state_dict = load_file(ckpt_path)
+            else:
+                part_state_dict = torch.load(ckpt_path, map_location="cpu")
+            state_dict.update(part_state_dict)
+            
+        # 5. Key Remapping (blocks. -> dit.blocks.)
+        tensors_to_load = {}
+        for k, v in state_dict.items():
+            if k.startswith("dit."):
+                tensors_to_load[k] = v
+            # Check for DiT keys
+            elif k.startswith('blocks.') or k.startswith('patch_embedding.') or k.startswith('text_embedding.') or k.startswith('time_embedding.') or k.startswith('time_projection.') or k.startswith('head.') or k.startswith('img_emb.') or k.startswith('ref_conv.'):
+                 tensors_to_load[f"dit.{k}"] = v
+            else:
+                 tensors_to_load[k] = v
+                 
+        # 6. Load into model
+        missing, unexpected = model.load_state_dict(tensors_to_load, strict=False)
+        logger.info(f"Loaded weights. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+        
+        # 7. Move to device/dtype
+        if dtype is not None:
+             model.to(dtype=dtype)
+        if device != "cpu":
+             model.to(device)
+             
+        return model
 
 
 __all__ = [

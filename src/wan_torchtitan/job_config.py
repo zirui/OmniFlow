@@ -18,6 +18,8 @@ class Training:
     """Image width to sample"""
     test_mode: bool = False
     """Whether to use integration test mode, which will randomly initialize the encoder and use a dummy tokenizer"""
+    load_from_pretrained_path: str = ""
+    """Path to load pre-trained DiT model from"""
 
 
 @dataclass

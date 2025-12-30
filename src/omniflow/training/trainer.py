@@ -13,6 +13,7 @@ from transformers import TrainerCallback
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from schedulers.flow_match import FlowMatchScheduler
+from utils.train_utils import get_memory
 
 
 class WanVideoCallback(TrainerCallback):
@@ -21,7 +22,21 @@ class WanVideoCallback(TrainerCallback):
     def on_train_begin(self, args, state, control, model=None, logs=None, **kwargs):
         model.freeze_except()
         logger.info(f"Trainable_modules: {model.trainable_modules}. Freezing other modules.")
+        
+        # Reset memory stats to track training peak instead of initialization peak
+        torch.cuda.reset_peak_memory_stats()
 
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs is not None and "loss" in logs:
+            allocated, reserved, max_alloc = get_memory()
+            logger.info(
+                f"step={state.global_step}, "
+                f"loss={logs['loss']:.4f}, "
+                f"allocated={allocated:.2f}GB, "
+                f"reserved={reserved:.2f}GB, "
+                f"max_alloc={max_alloc:.2f}GB"
+            )
+            
 
 class WanVideoTrainer(HFTrainer):
     """

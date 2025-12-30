@@ -26,30 +26,31 @@ dataset_config:
       
 model_config:
   # load_from_config:
-  # load_from_pretrained_path: "your_path_to_model"
-  model_type: wanvideo
+  load_from_pretrained_path: /zirui/models/Wan2.1-T2V-1.3B
+  # model_type: wanvideo
+  model_dtype: bfloat16
   config:
     # DiT model parameters
-    dit_hidden_size: 1536
-    dit_num_layers: 10
-    dit_num_heads: 12
-    dit_intermediate_size: 8960
-    dit_patch_size: [1, 2, 2]
-    dit_in_channels: 16
-    dit_out_channels: 16
-    dit_freq_dim: 256
-    dit_text_dim: 4096
-    dit_eps: 1.0e-6
-    dit_has_image_input: False
+    # dit_hidden_size: 1536
+    # dit_num_layers: 30
+    # dit_num_heads: 12
+    # dit_intermediate_size: 8960
+    # dit_patch_size: [1, 2, 2]
+    # dit_in_channels: 16
+    # dit_out_channels: 16
+    # dit_freq_dim: 256
+    # dit_text_dim: 4096
+    # dit_eps: 1.0e-6
+    # dit_has_image_input: False
 
-    dit_has_image_pos_emb: False
-    dit_has_ref_conv: False
-    dit_add_control_adapter: False
-    dit_in_channels_control_adapter: 24
-    seperated_timestep: True
-    require_clip_embedding: False
-    require_vae_embedding: False
-    fuse_vae_embedding_in_latents: True
+    # dit_has_image_pos_emb: False
+    # dit_has_ref_conv: False
+    # dit_add_control_adapter: False
+    # dit_in_channels_control_adapter: 24
+    # seperated_timestep: True
+    # require_clip_embedding: False
+    # require_vae_embedding: False
+    # fuse_vae_embedding_in_latents: True
     trainable_modules: 'dit'
     vae_type: wan_video_vae
 
@@ -79,14 +80,15 @@ trainer_args:
   
   dataloader_num_workers: 4
 
-  report_to: none
+  # report_to: none
+  report_to: wandb
   # use_wandb: false
   # wandb_project: t2v-debug
   # wandb_name: wan_i2v_14b
-  run_name: wan2.1_t2v-1.3b-h200-vidgen-0
+  run_name: wan2.1_t2v-1.3b-hf-sft-vid-debug
 
   fp16: false
-  bf16: true
+  bf16: false
   # tf32: true
   
   seed: 42
@@ -110,4 +112,7 @@ trainer_args:
     limit_all_gathers: true
     activation_checkpointing: true
     gradient_checkpointing: true
+  fsdp_transformer_layer_cls_to_wrap: "DiTBlock"
+  
+  # attn_implementation: "flash_attention_2"
   
