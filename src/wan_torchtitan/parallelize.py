@@ -99,14 +99,14 @@ def apply_fsdp_wan(
     #    -> .model (T5EncoderModel or T5Stack?) -> .encoder -> .block (T5Block)
     # -> .vae (WanVideoVAE)
     #    -> .encoder, .decoder -> blocks
-    # -> .model (WanDitModel) -> .blocks (DiTBlock)
+    # -> .dit (WanDitModel) -> .blocks (DiTBlock)
     
     wan_model = model.model # WanVideoForConditionalGeneration
     
     # 1. Shard DiT Blocks
-    # WanDitModel is wan_model.model
-    if hasattr(wan_model, "model") and hasattr(wan_model.model, "blocks"):
-        for block in wan_model.model.blocks:
+    # WanDitModel is wan_model.dit
+    if hasattr(wan_model, "dit") and hasattr(wan_model.dit, "blocks"):
+        for block in wan_model.dit.blocks:
             fully_shard(block, **fsdp_config)
     
     # 2. Shard VAE Blocks (if trainable/heavy)
