@@ -447,10 +447,10 @@ class WanDitModel(PreTrainedModel, ModelProtocol):
         use_gradient_checkpointing_offload: bool = False,
         **kwargs,
     ):  
-        print_tensor(x, "x")
-        print_tensor(timestep, "timestep")
-        print_tensor(context, "context")
-        print_tensor(self.time_embedding[0].weight, "time_embedding[0].weight")
+        # print_tensor(x, "x")
+        # print_tensor(timestep, "timestep")
+        # print_tensor(context, "context")
+        # print_tensor(self.time_embedding[0].weight, "time_embedding[0].weight")
         t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep).to(dtype=x.dtype, device=x.device))
         t_mod = self.time_projection(t).unflatten(1, (6, self.hidden_size))
         context = self.text_embedding(context)  # self.text_embedding is an adapter.
@@ -475,7 +475,7 @@ class WanDitModel(PreTrainedModel, ModelProtocol):
             .reshape(f * h * w, 1, -1)
             .to(x.device)
         )
-        print_tensor(freqs, "freqs")
+        # print_tensor(freqs, "freqs")
 
         def create_custom_forward(module):
             def custom_forward(*inputs):
@@ -483,6 +483,7 @@ class WanDitModel(PreTrainedModel, ModelProtocol):
 
             return custom_forward
 
+        # print_tensor(self.blocks[0].ffn[0].weight, "blocks[0].ffn[0].weight")
         for block in self.blocks:
             if self.training and use_gradient_checkpointing:
                 if use_gradient_checkpointing_offload:
@@ -509,7 +510,7 @@ class WanDitModel(PreTrainedModel, ModelProtocol):
 
         x = self.head(x, t)
         x = self.unpatchify(x, (f, h, w))
-        print_tensor(x, "final_output")
+        # print_tensor(x, "final_output")
         return x
 
     def init_weights(self, buffer_device=None):

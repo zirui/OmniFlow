@@ -30,7 +30,7 @@ def parallelize_wan(
 
     # TODO (limou)
     # enable FSDP for Wan model components
-    return model
+    # return model
     
     # TODO: zirui, Check if we should freeze components
     if hasattr(model, "freeze_except"):
@@ -84,7 +84,7 @@ def apply_ac(model: nn.Module, ac_config):
             block = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
             wan_dit.blocks.register_module(layer_id, block)
 
-    logger.info(f"Applied {ac_config.mode} activation checkpointing to the Wan model")
+        logger.info(f"Applied {ac_config.mode} activation checkpointing to the Wan model")
 
 def apply_fsdp_wan(
     model: nn.Module,
@@ -111,8 +111,10 @@ def apply_fsdp_wan(
     
     # 1. Shard DiT Blocks
     # WanDitModel is wan_model.model
-    if hasattr(wan_model, "model") and hasattr(wan_model.model, "blocks"):
-        for block in wan_model.model.blocks:
+    if hasattr(wan_model, "blocks"):
+        logger.info("Sharding Wan DiT blocks")
+        assert len(wan_model.blocks) > 0, "No DiT blocks found to shard."
+        for block in wan_model.blocks:
             fully_shard(block, **fsdp_config)
     
     # 2. Shard VAE Blocks (if trainable/heavy)
@@ -151,13 +153,15 @@ def apply_fsdp_wan(
     #     fully_shard(wan_model.vae, **fsdp_config)
 
     # 3. Shard Text Encoder (T5)
-    if hasattr(wan_model, "text_encoder"):
-        text_enc = wan_model.text_encoder
-        if hasattr(text_enc, "model") and hasattr(text_enc.model, "encoder") and hasattr(text_enc.model.encoder, "block"):
-             for block in text_enc.model.encoder.block:
-                 fully_shard(block, **fsdp_config)
+    # if hasattr(wan_model, "text_encoder"):
+    #     text_enc = wan_model.text_encoder
+    #     if hasattr(text_enc, "model") and hasattr(text_enc.model, "encoder") and hasattr(text_enc.model.encoder, "block"):
+    #         logger.info("Sharding Wan text encoder T5 blocks")
+    #         assert len(text_enc.model.encoder.block) > 0, "No T5 blocks found to shard."
+    #         for block in text_enc.model.encoder.block:
+    #             fully_shard(block, **fsdp_config)
         
-        fully_shard(text_enc, **fsdp_config)
+    #     fully_shard(text_enc, **fsdp_config)
 
     # 4. Shard root
     fully_shard(model, **fsdp_config)

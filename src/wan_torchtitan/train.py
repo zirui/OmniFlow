@@ -30,7 +30,6 @@ class WanTrainer(Trainer):
     def __init__(self, job_config: JobConfig):
         super().__init__(job_config)
         model = self.model_parts[0]
-        print_tensor(model.time_embedding[0].weight, "model.dit.time_embedding[0]")
 
         logger.info(f"Building Wan Model using local experiment definition")
         self._dtype = (

@@ -13,7 +13,7 @@ echo "PYTHONPATH : ${PYTHONPATH}"
 
 # Distributed args
 NNODES=1
-NPROC_PER_NODE=1  # Set to 8 for full node, 1 for debug
+NPROC_PER_NODE=2  # Set to 8 for full node, 1 for debug
 MASTER_ADDR="localhost"
 MASTER_PORT="26500"
 
