@@ -9,7 +9,7 @@ flavor = "wan2.1_t2v_debug"
 
 [metrics]
 log_freq = 1
-disable_color_printing = false
+disable_color_printing = true
 enable_tensorboard = false
 save_tb_folder = "tb"
 enable_wandb = false

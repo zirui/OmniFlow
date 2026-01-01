@@ -19,6 +19,7 @@ from .wan_video_vae import WanVideoVAE38, WanVideoVAE
 
 PATTERN = "B C H W"
 
+from debug_utils import print_tensor
 
 @dataclass
 class WanVideoOutput(ModelOutput):
@@ -82,6 +83,13 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
     def encode_prompt(self, input_ids, attetnion_mask, device="cuda"):
         seq_lens = attetnion_mask.gt(0).sum(dim=1).long()
         prompt_emb = self.text_encoder(input_ids, attetnion_mask)
+        logger.info(f"seq_lens={seq_lens}")
+        for i, (name, param) in enumerate(self.text_encoder.named_parameters()):
+            if i >= 3:
+                break
+            print(f"name: {name}")
+            print(f"weight tensor:\n{param}")
+        print_tensor(prompt_emb, "omni prompt_emb")
         for i, v in enumerate(seq_lens):
             prompt_emb[:, v:] = 0
         return prompt_emb
@@ -114,10 +122,14 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         device=None,
         dtype=None,
     ):
+        # limou
+        # seed = 42
         # Initialize Gaussian noise
         generator = None if seed is None else torch.Generator(rand_device).manual_seed(seed)
         noise = torch.randn(shape, generator=generator, device=rand_device, dtype=rand_dtype)
-        noise = noise.to(dtype=dtype or self.dtype, device=device or self.device)
+        noise = noise.to(dtype=torch.float32, device=device or self.device)
+        logger.info(f"seed={seed}")
+        print_tensor(noise, "omni noise")
         return noise
 
     def check_resize_height_width(self, height, width, num_frames=None):
@@ -278,6 +290,23 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
 
 
     def forward_preprocess(self, scheduler, data_inputs: dict[str, Any]):
+        _data = torch.load("/workspace/common_module/input_data.pt")
+        data_inputs = {}
+        for k, v in _data.items():
+            if isinstance(v, torch.Tensor):
+                data_inputs[k] = v.to(self.device)
+            else:
+                data_inputs[k] = v
+        # data_inputs["seed"] = 42
+        # # logger.info(data_inputs)
+        # torch.manual_seed(42)
+
+        # limou
+        video = data_inputs["video"]
+        input_ids = data_inputs["input_ids"]
+        print_tensor(video, "omni video")
+        print_tensor(input_ids, "omni input_ids")
+
         inputs = data_inputs
         height, width, num_frames = self.check_resize_height_width(
             inputs["height"], inputs["width"], inputs["num_frames"]
@@ -374,6 +403,14 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
                 }
             )
 
+        # _inputs = torch.load("/workspace/common_module/inputs_preprocessed.pt")
+        # inputs = {}
+        # for k, v in _inputs.items():
+        #     if isinstance(v, torch.Tensor):
+        #         inputs[k] = v.to(self.device)
+        #     else:
+        #         inputs[k] = v
+        logger.info("omni preprocess done, inputs={}".format(inputs))
         return inputs
 
     def forward(
@@ -390,6 +427,19 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         control_camera_latents_input: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> WanVideoOutput:
+        _dit_inputs = torch.load("/workspace/common_module/dit_inputs.pt")
+        latents = _dit_inputs["latents"].to(dtype=self.dtype, device=self.device)
+        context = _dit_inputs["context"].to(dtype=self.dtype, device=self.device)
+        timestep = _dit_inputs["timestep"].to(self.device)
+        # limou
+        print_tensor(latents, "omni titan latents")
+        print_tensor(context, "omni context")
+        print_tensor(timestep, "omni timestep")
+        print_tensor(y, "omni y")
+        print_tensor(reference_latents, "omni reference_latents")
+        print_tensor(clip_feature, "omni clip_feature")
+        print_tensor(control_camera_latents_input, "omni control_camera_latents_input")
+
         t = self.dit.time_embedding(
             sinusoidal_embedding_1d(self.dit.freq_dim, timestep).to(device=self.dit.device, dtype=self.dit.dtype)
         )
@@ -449,6 +499,7 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             f -= 1
         x = self.dit.unpatchify(x, (f, h, w))
 
+        # print_tensor("final omni x", x)
         return WanVideoOutput(
             noise_pred=x,
             text_embeddings=context,

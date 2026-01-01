@@ -10,7 +10,7 @@ flavor = "wan2.1_t2v_1.3b"
 
 [metrics]
 log_freq = 1
-disable_color_printing = false
+disable_color_printing = true
 enable_tensorboard = false
 save_tb_folder = "tb"
 enable_wandb = false
@@ -22,8 +22,10 @@ enable_wandb = false
 local_batch_size = 2
 max_norm = 1.0
 mixed_precision_param = "bfloat16"
-steps = 10000
+steps = 1
 enable_cpu_offload = false
+deterministic = true
+seed = 42
 
 # dataset = "/root/zirui/data/example_video_dataset/metadata.jsonl"
 # dataset = "example_video"
@@ -57,7 +59,7 @@ pipeline_parallel_degree = 1
 mode = "full"
 
 [checkpoint]
-enable = true
+enable = false
 interval = 100
 export_dtype = "float32"
 

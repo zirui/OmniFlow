@@ -14,7 +14,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from schedulers.flow_match import FlowMatchScheduler
 from utils.train_utils import get_memory
-
+from debug_utils import print_tensor
 
 class WanVideoCallback(TrainerCallback):
     """Callback to freeze non-trainable modules at training start."""
@@ -160,6 +160,9 @@ class WanVideoTrainer(HFTrainer):
         
         # Compute MSE loss
         noise_pred = output.noise_pred
+        print_tensor(noise_pred.float(), "omni noise_pred")
+        print_tensor(training_target.float(), "omni training_target")
         loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float(), reduction="mean")
         loss = loss * self.scheduler.training_weight(timestep)
+        print_tensor(loss, "omni loss")
         return loss
