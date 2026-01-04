@@ -1,16 +1,14 @@
 #!/bin/bash
 
 CURDIR=$(cd $(dirname $0); pwd)
-cd $CURDIR
 
 # CONFIG="configs/wan2.2_t2v_5b.yml"
 CONFIG="configs/wan2.1_t2v_1.3b_sft.yml"
-#  --report_to none
 
 # Number of GPUs
 NGPUS=1
 
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=3
 export PYTHONPATH=/workspace/common_module:$CURDIR/../
 export WANDB_DISABLED=1
 
@@ -22,6 +20,5 @@ torchrun --nproc_per_node=${NGPUS} \
   --node_rank=0 \
   --master_addr=127.0.0.1 \
   --master_port=12356 \
-  -m train \
-    --config ${CONFIG}
+  train.py --config ${CONFIG} \
 

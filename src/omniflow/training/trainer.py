@@ -14,7 +14,6 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from schedulers.flow_match import FlowMatchScheduler
 from utils.train_utils import get_memory
-from debug_utils import print_tensor
 
 class WanVideoCallback(TrainerCallback):
     """Callback to freeze non-trainable modules at training start."""
@@ -56,7 +55,6 @@ class WanVideoTrainer(HFTrainer):
         # Initialize flow-matching scheduler
         self.scheduler = FlowMatchScheduler(shift=5, sigma_min=0.0, extra_one_step=True)
         self.scheduler.set_timesteps(1000, training=True)
-        logger.info(f"Setting timesteps for diffusion training: {len(self.scheduler.timesteps)} steps")
 
     def compute_loss(
         self,
@@ -115,11 +113,13 @@ class WanVideoTrainer(HFTrainer):
         }
         
         # Sample random timestep
+        if not hasattr(self, "timestep_generator"):
+            self.timestep_generator = torch.Generator().manual_seed(42)
+
         max_timestep_boundary = int(1 * self.scheduler.num_train_timesteps)
         min_timestep_boundary = int(0 * self.scheduler.num_train_timesteps)
-        timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
+        timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,), generator=self.timestep_generator)
         timestep = self.scheduler.timesteps[timestep_id]
-
         # Preprocess inputs (encode video, text, etc.)
         if isinstance(model, FSDP):
             with FSDP.summon_full_params(model, writeback=False, rank0_only=False):
@@ -160,9 +160,12 @@ class WanVideoTrainer(HFTrainer):
         
         # Compute MSE loss
         noise_pred = output.noise_pred
-        print_tensor(noise_pred.float(), "omni noise_pred")
-        print_tensor(training_target.float(), "omni training_target")
         loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float(), reduction="mean")
         loss = loss * self.scheduler.training_weight(timestep)
-        print_tensor(loss, "omni loss")
         return loss
+
+    def _get_train_sampler(self,
+        train_dataset: Optional[torch.utils.data.Dataset] = None) -> Optional[torch.utils.data.Sampler]:
+        if train_dataset is None:
+            train_dataset = self.train_dataset
+        return torch.utils.data.SequentialSampler(train_dataset)

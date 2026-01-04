@@ -12,8 +12,6 @@ from transformers.utils import TransformersKwargs, can_return_tuple, logging
 
 from .configuration_wanvideo import WanVideoConfig
 
-from debug_utils import print_tensor
-
 logger = logging.get_logger(__name__)
 
 # Try to import flash attention
@@ -428,8 +426,6 @@ class WanDitModel(PreTrainedModel):
         use_gradient_checkpointing_offload: bool = False,
         **kwargs,
     ):
-        # limou
-        print_tensor(x, "omni dit latents")
         t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep))
         t_mod = self.time_projection(t).unflatten(1, (6, self.hidden_size))
         context = self.text_embedding(context)  # self.text_embedding is an adapter.

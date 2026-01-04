@@ -24,6 +24,9 @@ class T5LayerNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
+    def reset_parameters(self):
+        nn.init.ones_(self.weight)
+
     def forward(self, x):
         x = x * torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps)
         if self.weight.dtype in [torch.float16, torch.bfloat16]:
@@ -46,6 +49,12 @@ class T5Attention(nn.Module):
         self.v = nn.Linear(dim, dim_attn, bias=False)
         self.o = nn.Linear(dim_attn, dim, bias=False)
         self.dropout = nn.Dropout(dropout)
+
+    def reset_parameters(self):
+        nn.init.normal_(self.q.weight, std=(self.dim * self.dim_attn) ** -0.5)
+        nn.init.normal_(self.k.weight, std=self.dim**-0.5)
+        nn.init.normal_(self.v.weight, std=self.dim**-0.5)
+        nn.init.normal_(self.o.weight, std=(self.num_heads * self.dim_attn) ** -0.5)
 
     def forward(self, x, context=None, mask=None, pos_bias=None):
         """
@@ -94,6 +103,11 @@ class T5FeedForward(nn.Module):
         self.fc1 = nn.Linear(dim, dim_ffn, bias=False)
         self.fc2 = nn.Linear(dim_ffn, dim, bias=False)
         self.dropout = nn.Dropout(dropout)
+
+    def reset_parameters(self):
+        nn.init.normal_(self.gate[0].weight, std=self.dim**-0.5)
+        nn.init.normal_(self.fc1.weight, std=self.dim**-0.5)
+        nn.init.normal_(self.fc2.weight, std=self.dim_ffn**-0.5)
 
     def forward(self, x):
         x = self.fc1(x) * self.gate(x)
@@ -146,6 +160,9 @@ class T5RelativeEmbedding(nn.Module):
 
         # layers
         self.embedding = nn.Embedding(num_buckets, num_heads)
+
+    def reset_parameters(self):
+        nn.init.normal_(self.embedding.weight, std=(2 * self.num_buckets * self.num_heads) ** -0.5)
 
     def forward(self, lq, lk):
         device = self.embedding.weight.device

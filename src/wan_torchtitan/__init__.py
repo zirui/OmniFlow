@@ -22,7 +22,7 @@ wan_args = {
     ),
     "wan2.1_t2v_1.3b": WanModelArgs(
         dit_hidden_size=1536,
-        dit_num_layers=4,
+        dit_num_layers=30,
         dit_num_heads=12,
         dit_intermediate_size=8960,
         dit_in_channels=16,

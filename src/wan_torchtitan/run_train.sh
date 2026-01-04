@@ -14,7 +14,6 @@ NPROC_PER_NODE=1  # Set to 8 for full node, 1 for debug
 MASTER_ADDR="localhost"
 MASTER_PORT="23500"
 
-#CONFIG_FILE="torchtitan/experiments/wan/train_configs/wan2.1_t2v_debug.toml"
 CONFIG_FILE="torchtitan/experiments/wan/train_configs/wan2.1_t2v_1.3b_sft.toml"
 
 export CUDA_VISIBLE_DEVICES=5

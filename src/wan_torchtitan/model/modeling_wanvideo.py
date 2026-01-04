@@ -18,8 +18,6 @@ from .wan_video_dit import WanDitModel, sinusoidal_embedding_1d
 from .wan_video_text_encoder import WanTextEncoder
 from .wan_video_vae import WanVideoVAE38, WanVideoVAE
 
-from debug_utils import print_tensor
-
 PATTERN = "B C H W"
 
 
@@ -84,14 +82,9 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
 
     def encode_prompt(self, input_ids, attetnion_mask, device="cuda"):
         seq_lens = attetnion_mask.gt(0).sum(dim=1).long()
-        prompt_emb = self.text_encoder(input_ids, attetnion_mask)
-        logger.info(f"seq_lens={seq_lens}")
-        for i, (name, param) in enumerate(self.text_encoder.named_parameters()):
-            if i >= 3:
-                break
-            print(f"name: {name}")
-            print(f"weight tensor:\n{param}")
-        print_tensor(prompt_emb, "titan prompt_emb")
+        self.text_encoder.eval()
+        with torch.no_grad():
+            prompt_emb = self.text_encoder(input_ids, attetnion_mask)
         for i, v in enumerate(seq_lens):
             prompt_emb[:, v:] = 0
         return prompt_emb
@@ -127,9 +120,7 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         # Initialize Gaussian noise
         generator = None if seed is None else torch.Generator(rand_device).manual_seed(seed)
         noise = torch.randn(shape, generator=generator, device=rand_device, dtype=rand_dtype)
-        noise = noise.to(dtype=torch.float32, device=device or self.device)
-        logger.info(f"seed={seed}")
-        print_tensor(noise, "omni noise")
+        noise = noise.to(dtype=dtype or self.dtype, device=device or self.device)
         return noise
 
     def check_resize_height_width(self, height, width, num_frames=None):
@@ -173,13 +164,15 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
 
     def embed_input_video(self, input_video, noise, tiled, tile_size, tile_stride, vace_reference_image):
         input_video = self.preprocess_video(input_video)  # B, C, T, H, W
-        input_latents = self.vae.encode(
-            input_video,
-            device=self.device,
-            tiled=tiled,
-            tile_size=tile_size,
-            tile_stride=tile_stride,
-        ).to(dtype=self.dtype, device=self.device)
+        self.vae.eval()
+        with torch.no_grad():
+            input_latents = self.vae.encode(
+                input_video,
+                device=self.device,
+                tiled=tiled,
+                tile_size=tile_size,
+                tile_stride=tile_stride,
+            ).to(dtype=self.dtype, device=self.device)
         if vace_reference_image is not None:
             vace_reference_image = self.preprocess_video([vace_reference_image])
             vace_reference_latents = self.vae.encode(vace_reference_image, device=self.device).to(
@@ -290,32 +283,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
 
 
     def forward_preprocess(self, scheduler, data_inputs: dict[str, Any]):
-        # cpu_dict = {k: v.detach().cpu() for k, v in data_inputs.items()}
-        # cpu_dict = {}
-        # for k, v in data_inputs.items():
-        #     if isinstance(v, torch.Tensor):
-        #         cpu_dict[k] = v.clone().detach().cpu()
-        #     else:
-        #         cpu_dict[k] = v
-        # torch.save(cpu_dict, "input_data.pt")
-
-        _data = torch.load("/workspace/common_module/input_data.pt")
-        data_inputs = {}
-        for k, v in _data.items():
-            if isinstance(v, torch.Tensor):
-                data_inputs[k] = v.to(self.device)
-            else:
-                data_inputs[k] = v
-        # data_inputs["seed"] = 42
-        # logger.info(data_inputs)
-        # torch.manual_seed(42)
-
-        # limou
-        video = data_inputs["video"]
-        input_ids = data_inputs["input_ids"]
-        print_tensor(video, "titan video")
-        print_tensor(input_ids, "titan input_ids")
-
         inputs = data_inputs
         height, width, num_frames = self.check_resize_height_width(
             inputs["height"], inputs["width"], inputs["num_frames"]
@@ -411,14 +378,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
                     "first_frame_latents": first_frame_latents,
                 }
             )
-        # _inputs = torch.load("/workspace/common_module/inputs_preprocessed.pt")
-        # inputs = {}
-        # for k, v in _inputs.items():
-        #     if isinstance(v, torch.Tensor):
-        #         inputs[k] = v.to(self.device)
-        #     else:
-        #         inputs[k] = v
-        logger.info("titan preprocess done, inputs={}".format(inputs))
 
         return inputs
 
@@ -436,18 +395,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         control_camera_latents_input: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> WanVideoOutput:
-        _dit_inputs = torch.load("/workspace/common_module/dit_inputs.pt")
-        latents = _dit_inputs["latents"].to(self.device)
-        context = _dit_inputs["context"].to(self.device)
-        timestep = _dit_inputs["timestep"].to(self.device)
-
-        print_tensor(latents, "titan latents")
-        print_tensor(context, "titan context")
-        print_tensor(timestep, "titan timestep")
-        print_tensor(y, "titan y")
-        print_tensor(reference_latents, "titan reference_latents")
-        print_tensor(clip_feature, "titan clip_feature")
-        print_tensor(control_camera_latents_input, "titan control_camera_latents_input")
         t = self.dit.time_embedding(
             sinusoidal_embedding_1d(self.dit.freq_dim, timestep).to(device=self.dit.device, dtype=self.dit.dtype)
         )
@@ -455,7 +402,7 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
 
         context = self.dit.text_embedding(context)
 
-        x = latents
+        x = latents.to(self.device)
         # Merged cfg
         if x.shape[0] != context.shape[0]:
             x = torch.concat([x] * context.shape[0], dim=0)
@@ -507,7 +454,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             f -= 1
         x = self.dit.unpatchify(x, (f, h, w))
 
-        # print_tensor("final titan x", x)
         return WanVideoOutput(
             noise_pred=x,
             text_embeddings=context,

@@ -163,7 +163,7 @@ def build_wan_dataloader(
         dataset,
         num_replicas=dp_world_size,
         rank=dp_rank,
-        shuffle=True,
+        shuffle=False,
     )
 
     # Wrap collator
@@ -172,8 +172,8 @@ def build_wan_dataloader(
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=job_config.training.local_batch_size,
-        sampler=sampler,
-        num_workers=4,
+        # sampler=sampler,
+        # num_workers=4,
         collate_fn=collator,
         pin_memory=True,
     )

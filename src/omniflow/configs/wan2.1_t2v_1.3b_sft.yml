@@ -79,10 +79,9 @@ trainer_args:
   save_steps: 100
   save_total_limit: 1
   
-  dataloader_num_workers: 4
+  dataloader_num_workers: 0
 
   report_to: none
-  # report_to: wandb
   # use_wandb: false
   # wandb_project: t2v-debug
   # wandb_name: wan_i2v_14b
