@@ -123,11 +123,13 @@ class WanVideoModel(nn.Module, ModelProtocol):
                 )
 
         # Sample random timestep
+        if not hasattr(self, "timestep_generator"):
+            self.timestep_generator = torch.Generator().manual_seed(42)
+
         max_timestep_boundary = int(1 * self.scheduler.num_train_timesteps)
         min_timestep_boundary = int(0 * self.scheduler.num_train_timesteps)
-        timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
+        timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,), generator=self.timestep_generator)
         timestep = self.scheduler.timesteps[timestep_id]
-
         # print(f"timestep_id: {timestep_id}, timestep: {timestep}, device: {timestep.device}", flush=True)
 
         # Preprocess

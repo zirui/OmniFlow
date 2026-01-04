@@ -1,15 +1,16 @@
 #!/bin/bash
 
+CURDIR=$(cd $(dirname $0); pwd)
+
 # CONFIG="configs/wan2.2_t2v_5b.yml"
-CONFIG="configs/wan2.2_t2v_debug.yml"
-  --report_to none
+CONFIG="configs/wan2.1_t2v_1.3b_sft.yml"
 
 # Number of GPUs
 NGPUS=1
 
 export CUDA_VISIBLE_DEVICES=3
-export PYTHONPATH=/zirui/code/OmniFlow/src
-# export WANDB_DISABLED=1
+export PYTHONPATH=/workspace/common_module:$CURDIR/../
+export WANDB_DISABLED=1
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 

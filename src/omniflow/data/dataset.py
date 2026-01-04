@@ -240,7 +240,7 @@ def build_dataloader(dataset, config):
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=config.batch_size,
-        shuffle=True,
+        shuffle=False,
         num_workers=config.num_workers,
     )
     return dataloader

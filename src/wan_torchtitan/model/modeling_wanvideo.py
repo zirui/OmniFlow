@@ -82,7 +82,9 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
 
     def encode_prompt(self, input_ids, attetnion_mask, device="cuda"):
         seq_lens = attetnion_mask.gt(0).sum(dim=1).long()
-        prompt_emb = self.text_encoder(input_ids, attetnion_mask)
+        self.text_encoder.eval()
+        with torch.no_grad():
+            prompt_emb = self.text_encoder(input_ids, attetnion_mask)
         for i, v in enumerate(seq_lens):
             prompt_emb[:, v:] = 0
         return prompt_emb
@@ -162,13 +164,15 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
 
     def embed_input_video(self, input_video, noise, tiled, tile_size, tile_stride, vace_reference_image):
         input_video = self.preprocess_video(input_video)  # B, C, T, H, W
-        input_latents = self.vae.encode(
-            input_video,
-            device=self.device,
-            tiled=tiled,
-            tile_size=tile_size,
-            tile_stride=tile_stride,
-        ).to(dtype=self.dtype, device=self.device)
+        self.vae.eval()
+        with torch.no_grad():
+            input_latents = self.vae.encode(
+                input_video,
+                device=self.device,
+                tiled=tiled,
+                tile_size=tile_size,
+                tile_stride=tile_stride,
+            ).to(dtype=self.dtype, device=self.device)
         if vace_reference_image is not None:
             vace_reference_image = self.preprocess_video([vace_reference_image])
             vace_reference_latents = self.vae.encode(vace_reference_image, device=self.device).to(
@@ -398,7 +402,7 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
 
         context = self.dit.text_embedding(context)
 
-        x = latents
+        x = latents.to(self.device)
         # Merged cfg
         if x.shape[0] != context.shape[0]:
             x = torch.concat([x] * context.shape[0], dim=0)
