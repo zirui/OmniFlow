@@ -21,8 +21,6 @@ class WanModelArgs(BaseModelArgs):
     dit_has_image_input: bool = False
     dit_has_image_pos_emb: bool = False
     dit_has_ref_conv: bool = False
-    dit_add_control_adapter: bool = False
-    dit_in_channels_control_adapter: int = 24
     seperated_timestep: bool = True
     require_clip_embedding: bool = False
     require_vae_embedding: bool = False

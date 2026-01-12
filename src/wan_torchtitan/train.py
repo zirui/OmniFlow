@@ -5,17 +5,17 @@
 # LICENSE file in the root directory of this source tree.
 
 from typing import Optional
+import os
+import random
+import numpy as np
 
 import torch
-import torch.nn as nn
 
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
-from torchtitan.distributed import ParallelDims
 
-from torchtitan.experiments.wan.wan_args import WanModelArgs
 from torchtitan.experiments.wan.wan_model import WanVideoModel
 from torchtitan.experiments.wan.parallelize import parallelize_wan
 from torchtitan.experiments.wan.loss import build_wan_loss
@@ -25,6 +25,19 @@ class WanTrainer(Trainer):
     def __init__(self, job_config: JobConfig):
         super().__init__(job_config)
         # TOOD: zirui, Re-initialize deterministic mode if needed (Flux does it for specific reasons, we might too)
+        
+        # Global seeding if FIXED_SEED is set(for debugging, will be removed)
+        if os.environ.get("FIXED_SEED"):
+            try:
+                # TODO: zirui, fixed global seed for debugging
+                seed = int(os.environ["FIXED_SEED"])
+                random.seed(seed)
+                np.random.seed(seed)
+                torch.manual_seed(seed)
+                torch.cuda.manual_seed_all(seed)
+                logger.info(f"Global seed set to {seed}")
+            except ValueError:
+                raise ValueError("FIXED_SEED must be an integer")
 
         logger.info(f"Building Wan Model using local experiment definition")
         self._dtype = (
@@ -34,13 +47,8 @@ class WanTrainer(Trainer):
         )
         
         # Parse Args
-        # model_args = WanModelArgs()
         model_args = self.train_spec.model_args[job_config.model.flavor]
         print(f"haha, {model_args=}", flush=True)
-        # model_args.update_from_config(job_config)
-        # self.model_args = model_args
-        
-        # init_device = "cpu" # or "meta" if we supported it fully. 
         
         # clean up existing model from Trainer init (if any)
         if hasattr(self, 'model_parts'):
@@ -52,10 +60,7 @@ class WanTrainer(Trainer):
         
         with utils.set_default_dtype(self._dtype):
              pretrained_path = job_config.training.load_from_pretrained_path
-             if pretrained_path:
-                 model = WanVideoModel(model_args, pretrained_dit_path=pretrained_path)
-             else:
-                 model = WanVideoModel(model_args)
+             model = WanVideoModel(model_args, pretrained_dit_path=pretrained_path)
         
         # Parallelize
         model = parallelize_wan(model, self.parallel_dims, job_config)

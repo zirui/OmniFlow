@@ -1,4 +1,5 @@
 import torch
+import os
 import torch.nn as nn
 from torchtitan.protocols.model import ModelProtocol
 from typing import Optional
@@ -13,22 +14,19 @@ class WanVideoModel(nn.Module, ModelProtocol):
         super().__init__()
 
         self.model_args = model_args
-
-        if pretrained_dit_path:
-             print(f"Loading custom DiT from {pretrained_dit_path}")
-             # Pass vae_type etc from model_args
-             self.model = WanVideoForConditionalGeneration.load_dit(
-                 pretrained_dit_path, 
-                 vae_type=model_args.vae_type
-             )
-        else:
-            # Convert WanModelArgs to WanVideoConfig
-            config_dict = {
+        config_dict = {
                 k: v
                 for k, v in vars(model_args).items()
                 if k in WanVideoConfig.__annotations__ or k in WanVideoConfig().__dict__
-            }
+        }
 
+        if pretrained_dit_path:
+            print(f"Loading custom DiT from {pretrained_dit_path}")
+            self.model = WanVideoForConditionalGeneration.load_dit(
+                 pretrained_dit_path, 
+                 **config_dict
+            )
+        else:
             wan_config = WanVideoConfig(**config_dict)
             self.model = WanVideoForConditionalGeneration(wan_config)
 
@@ -89,22 +87,12 @@ class WanVideoModel(nn.Module, ModelProtocol):
             "attention_mask": None,
             "cfg_scale": 1,
             "cfg_merge": False,
-            "vace_scale": 1,
             "seed": None,
-            "vace_reference_image": None,
             "reference_image": None,
             "tiled": False,
             "tile_size": None,
             "tile_stride": None,
             "end_image": None,
-            "camera_control_direction": None,
-            "camera_control_speed": None,
-            "camera_control_origin": None,
-            "control_video": None,
-            "motion_bucket_id": None,
-            "vace_video": None,
-            "vace_video_mask": None,
-            # "input_image": video[:, 0] if video.ndim == 5 else video[0],
             "input_image": video.select(2, 0) if video.ndim == 5 else video[0],
         }
         for k, v in defaults.items():
@@ -122,13 +110,32 @@ class WanVideoModel(nn.Module, ModelProtocol):
                     video.shape[:3]
                 )
 
-        # Sample random timestep
-        max_timestep_boundary = int(1 * self.scheduler.num_train_timesteps)
-        min_timestep_boundary = int(0 * self.scheduler.num_train_timesteps)
-        timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
-        timestep = self.scheduler.timesteps[timestep_id]
+        # Global seeding if FIXED_SEED is set(for debugging, will be removed)
+        if os.environ.get("FIXED_SEED"):
+            try:
+                fixed_seed = int(os.environ["FIXED_SEED"])
+                inputs_dict["seed"] = fixed_seed
+            except ValueError:
+                raise ValueError(f"Invalid FIXED_SEED value: {os.environ['FIXED_SEED']}")
 
-        # print(f"timestep_id: {timestep_id}, timestep: {timestep}, device: {timestep.device}", flush=True)
+        # Sample random timestep
+        if os.environ.get("FIXED_TIMESTEP"):
+            try:
+                fixed_step = int(os.environ["FIXED_TIMESTEP"])
+                max_step = self.scheduler.num_train_timesteps - 1
+                if fixed_step < 0 or fixed_step > max_step:
+                     print(f"FIXED_TIMESTEP {fixed_step} out of range [0, {max_step}]. Clamping.")
+                     fixed_step = max(0, min(fixed_step, max_step))
+                
+                timestep_id = torch.tensor([fixed_step], device=self.scheduler.timesteps.device)
+                # print(f"Using FIXED_TIMESTEP: {fixed_step}")
+            except ValueError:
+                raise ValueError(f"Invalid FIXED_TIMESTEP value: {os.environ['FIXED_TIMESTEP']}")
+        else:
+            max_timestep_boundary = int(1 * self.scheduler.num_train_timesteps)
+            min_timestep_boundary = int(0 * self.scheduler.num_train_timesteps)
+            timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
+        timestep = self.scheduler.timesteps[timestep_id]
 
         # Preprocess
         # OOM Fix: VAE and TextEncoder are frozen and heavy. Ensure no gradients are computed.
@@ -159,12 +166,6 @@ class WanVideoModel(nn.Module, ModelProtocol):
             y=pre_processed_inputs.get("y", None),
             reference_latents=pre_processed_inputs.get("reference_latents", None),
             clip_feature=pre_processed_inputs.get("clip_feature", None),
-            vace_context=pre_processed_inputs.get("vace_context", None),
-            vace_scale=pre_processed_inputs.get("vace_scale", 1.0),
-            motion_bucket_id=pre_processed_inputs.get("motion_bucket_id", None),
-            control_camera_latents_input=pre_processed_inputs.get(
-                "control_camera_latents_input", None
-            ),
         )
 
         # Return tuple for Loss function

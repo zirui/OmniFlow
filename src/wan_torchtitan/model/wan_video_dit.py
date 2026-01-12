@@ -1,14 +1,13 @@
 import math
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Optional, Tuple 
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange, repeat
+from einops import rearrange 
 from transformers import PreTrainedModel
 from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.modeling_outputs import BaseModelOutput
-from transformers.utils import TransformersKwargs, can_return_tuple, logging
+from transformers.utils import logging
 
 from .configuration_wanvideo import WanVideoConfig
 
@@ -310,23 +309,6 @@ class Head(nn.Module):
         return x
 
 
-# class WanPreTrainedModel(PreTrainedModel):
-#     config: WanVideoConfig
-#     base_model_prefix = "model"
-#     supports_gradient_checkpointing = True
-#     _no_split_modules = ["DiTBlock"]
-#     # _skip_keys_device_placement = ["past_key_values"]
-#     _supports_flash_attn = True
-#     _supports_sdpa = True
-
-#     _can_compile_fullgraph = True
-#     _supports_attention_backend = True
-#     _can_record_outputs = {
-#         "hidden_states": DiTBlock,
-#         "attentions": SelfAttention,
-#     }
-
-
 class WanDitModel(PreTrainedModel):
     config: WanVideoConfig
     base_model_prefix = "dit"
@@ -360,8 +342,6 @@ class WanDitModel(PreTrainedModel):
 
         self.has_image_pos_emb = config.dit_has_image_pos_emb
         self.has_ref_conv = config.dit_has_ref_conv
-        self.add_control_adapter = config.dit_add_control_adapter
-        self.in_channels_control_adapter = config.dit_in_channels_control_adapter
 
         # build the WanDit model
         self.freqs = precompute_freqs_cis_3d(head_dim)
@@ -407,26 +387,12 @@ class WanDitModel(PreTrainedModel):
         if self.has_ref_conv:
             self.ref_conv = nn.Conv2d(self.in_channels, self.hidden_size, kernel_size=(2, 2), stride=(2, 2))
 
-        # if self.add_control_adapter:
-        #     self.control_adapter = SimpleAdapter(
-        #         self.in_channels_control_adapter,
-        #         self.hidden_size,
-        #         kernel_size=self.patch_size[1:],
-        #         stride=self.patch_size[1:],
-        #     )
-        # else:
-        #     self.control_adapter = None
 
     def patchify(
         self,
         x: torch.Tensor,
-        control_camera_latents_input: Optional[torch.Tensor] = None,
     ):
         x = self.patch_embedding(x)
-        # if self.control_adapter is not None and control_camera_latents_input is not None:
-        #     y_camera = self.control_adapter(control_camera_latents_input)
-        #     x = [u + v for u, v in zip(x, y_camera)]
-        #     x = x[0].unsqueeze(0)
         grid_size = x.shape[2:]
         x = rearrange(x, "b c f h w -> b (f h w) c").contiguous()
         return x, grid_size  # x, grid_size: (f, h, w)

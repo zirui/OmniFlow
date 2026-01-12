@@ -2,10 +2,9 @@ import os
 from dataclasses import dataclass
 from typing import Any, Optional 
 
-import numpy as np
 import torch
-import torch.nn.functional as F
-from einops import rearrange, repeat
+
+from einops import repeat
 from loguru import logger
 import json
 import glob
@@ -80,11 +79,11 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
                 model.eval()
                 model.requires_grad_(False)
 
-    def encode_prompt(self, input_ids, attetnion_mask, device="cuda"):
-        seq_lens = attetnion_mask.gt(0).sum(dim=1).long()
-        prompt_emb = self.text_encoder(input_ids, attetnion_mask)
+    def encode_prompt(self, input_ids, attention_mask, device="cuda"):
+        seq_lens = attention_mask.gt(0).sum(dim=1).long()
+        prompt_emb = self.text_encoder(input_ids, attention_mask)
         for i, v in enumerate(seq_lens):
-            prompt_emb[:, v:] = 0
+            prompt_emb[i, v:] = 0
         return prompt_emb
 
     def preprocess_video(
@@ -144,10 +143,8 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
 
         return height, width, num_frames
 
-    def noise_initialize(self, height, width, num_frames, seed, rand_device, vace_reference_image, batch_size=1):
+    def noise_initialize(self, height, width, num_frames, seed, rand_device, batch_size=1):
         length = (num_frames - 1) // 4 + 1
-        if vace_reference_image is not None:
-            length += 1
         shape = (
             batch_size,
             self.vae.model.z_dim,
@@ -156,11 +153,9 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             width // self.vae.upsampling_factor,
         )
         noise = self.generate_noise(shape, seed=seed, rand_device=rand_device)
-        if vace_reference_image is not None:
-            noise = torch.concat((noise[:, :, -1:], noise[:, :, :-1]), dim=2)
         return noise
 
-    def embed_input_video(self, input_video, noise, tiled, tile_size, tile_stride, vace_reference_image):
+    def embed_input_video(self, input_video, noise, tiled, tile_size, tile_stride):
         input_video = self.preprocess_video(input_video)  # B, C, T, H, W
         input_latents = self.vae.encode(
             input_video,
@@ -169,12 +164,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             tile_size=tile_size,
             tile_stride=tile_stride,
         ).to(dtype=self.dtype, device=self.device)
-        if vace_reference_image is not None:
-            vace_reference_image = self.preprocess_video([vace_reference_image])
-            vace_reference_latents = self.vae.encode(vace_reference_image, device=self.device).to(
-                dtype=self.dtype, device=self.device
-            )
-            input_latents = torch.concat([vace_reference_latents, input_latents], dim=2)
         return input_latents
 
     def embed_image_VAE(
@@ -289,31 +278,30 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             vid = inputs["video"]
             if vid.ndim == 5:
                 # (B, C, F, H, W)
-                if vid.shape[2] != num_frames or vid.shape[3] != height or vid.shape[4] != width:
-                    # vid.shape[2:] is (F, H, W)
-                    logger.info(f"Resizing input video tensor (5D) from {vid.shape[2:]} to {(num_frames, height, width)}")
-                    vid = torch.nn.functional.interpolate(vid, size=(num_frames, height, width), mode='trilinear', align_corners=False)
-                    inputs["video"] = vid
-            elif vid.ndim == 4:
-                # (F, H, W, C)
-                if vid.shape[0] != num_frames or vid.shape[1] != height or vid.shape[2] != width:
-                    logger.info(f"Resizing input video tensor (4D) from {vid.shape[:3]} to {(num_frames, height, width)}")
-                    vid = vid.permute(3, 0, 1, 2).unsqueeze(0) # (1, C, F, H, W)
-                    vid = torch.nn.functional.interpolate(vid, size=(num_frames, height, width), mode='trilinear', align_corners=False)
-                    inputs["video"] = vid.squeeze(0).permute(1, 2, 3, 0).contiguous()
+                # logger.debug(f"DEBUG: video input shape: {vid.shape}")
+
+                # Ensure dtype matches model
+                if vid.dtype != self.dtype:
+                    logger.info(f"Casting video from {vid.dtype} to {self.dtype}")
+                    vid = vid.to(self.dtype)
+
+                inputs["video"] = vid
         batch_size = 1
         if inputs.get("video") is not None and isinstance(inputs["video"], torch.Tensor) and inputs["video"].ndim == 5:
              batch_size = inputs["video"].shape[0]
         elif inputs.get("input_ids") is not None:
              batch_size = inputs["input_ids"].shape[0]
-            
+
+        # Force eval mode for frozen encoders to disable dropout
+        self.text_encoder.eval()
+        self.vae.eval()
+
         noise = self.noise_initialize(
             inputs["height"],
             inputs["width"],
             inputs["num_frames"],
             inputs["seed"],
-            self.device,
-            inputs["vace_reference_image"],
+            "cpu",
             batch_size=batch_size,
         )
         inputs.update({"noise": noise})
@@ -325,7 +313,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
                 inputs["tiled"],
                 inputs["tile_size"],
                 inputs["tile_stride"],
-                inputs["vace_reference_image"],
             )
             if not scheduler.training:
                 latents = scheduler.add_noise(input_latents, noise, timestep=scheduler.timesteps[0])
@@ -385,16 +372,50 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         y: Optional[torch.FloatTensor] = None,
         reference_latents: Optional[torch.Tensor] = None,
         clip_feature: Optional[torch.FloatTensor] = None,
-        vace_context: Optional[torch.FloatTensor] = None,
-        vace_scale: Optional[float] = 1.0,
-        motion_bucket_id: Optional[int] = None,
-        control_camera_latents_input: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> WanVideoOutput:
-        t = self.dit.time_embedding(
-            sinusoidal_embedding_1d(self.dit.freq_dim, timestep).to(device=self.dit.device, dtype=self.dit.dtype)
-        )
-        t_mod = self.dit.time_projection(t).unflatten(1, (6, self.dit.hidden_size))
+        # TODO: zirui, for debugging
+        # print(f"DEBUG:  {self.seperated_timestep=}, {self.config.fuse_vae_embedding_in_latents=}")
+        if self.seperated_timestep and self.config.fuse_vae_embedding_in_latents:
+            # Logic to split timestep for T2V (first frame t=0) to match DiffSynth/WanVideo
+            # if torch.rand(1).item() < 0.001: 
+            #      logger.info("DEBUG: Using separated_timestep logic (first frame t=0)")
+            F = latents.shape[2]
+            H = latents.shape[3]
+            W = latents.shape[4]
+            spatial_size = (H * W) // 4
+            
+            # Ensure timestep is (B,)
+            if timestep.ndim == 0:
+                timestep = timestep.unsqueeze(0).repeat(latents.shape[0])
+            elif timestep.shape[0] != latents.shape[0]:
+                timestep = timestep.repeat(latents.shape[0])
+            
+            # t_seq: (B, F, spatial_patches)
+            time_seq = torch.zeros((latents.shape[0], F, spatial_size), dtype=timestep.dtype, device=timestep.device)
+            # Fill frames 1..F with timestep
+            time_seq[:, 1:, :] = timestep.view(-1, 1, 1)
+            
+            # Flatten to (B, L)
+            timestep_input = time_seq.flatten(1)
+            
+            # Embed
+            # sinusoidal_embedding_1d expects 1D input, so we flatten B*L
+            flat_timestep = timestep_input.flatten()
+            emb = sinusoidal_embedding_1d(self.dit.freq_dim, flat_timestep)
+            # Reshape back to (B, L, D) - actually embedding layer might handle it but let's be safe
+            emb = emb.view(latents.shape[0], -1, self.dit.freq_dim)
+            
+            t = self.dit.time_embedding(emb.to(device=self.dit.device, dtype=self.dit.dtype))
+            
+            # Projection to (B, L, 6, H) - Note unflatten dim 2
+            t_mod = self.dit.time_projection(t).unflatten(2, (6, self.dit.hidden_size))
+            
+        else:
+            t = self.dit.time_embedding(
+                sinusoidal_embedding_1d(self.dit.freq_dim, timestep).to(device=self.dit.device, dtype=self.dit.dtype)
+            )
+            t_mod = self.dit.time_projection(t).unflatten(1, (6, self.dit.hidden_size))
 
         context = self.dit.text_embedding(context)
 
@@ -413,8 +434,8 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             clip_embdding = self.dit.img_emb(clip_feature)
             context = torch.cat([clip_embdding, context], dim=1)
 
-        # Add camera control
-        x, (f, h, w) = self.dit.patchify(x, control_camera_latents_input)
+        # Add camera control(TODO: remove)
+        x, (f, h, w) = self.dit.patchify(x)
 
         # Reference image
         if reference_latents is not None:
@@ -438,7 +459,23 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         )
 
 
+        def create_custom_forward(module):
+            def custom_forward(*inputs):
+                return module(*inputs)
+            return custom_forward
+
         for block_id, block in enumerate(self.dit.blocks):
+            # if self.training and self.gradient_checkpointing:
+            #      x = torch.utils.checkpoint.checkpoint(
+            #         create_custom_forward(block),
+            #         x,
+            #         context,
+            #         t_mod,
+            #         freqs,
+            #         use_reentrant=False,
+            #     )
+            # else:
+            #     x = block(x, context, t_mod, freqs)
             x = block(x, context, t_mod, freqs)
 
         x = self.dit.head(x, t)
@@ -536,6 +573,7 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         for ckpt_path in weight_files:
             logger.info(f"Loading weights from {ckpt_path}")
             if ckpt_path.endswith(".safetensors"):
+                logger.info(f"DEBUG: Loading safetensors from {ckpt_path}")
                 part_state_dict = load_file(ckpt_path)
             else:
                 part_state_dict = torch.load(ckpt_path, map_location="cpu")

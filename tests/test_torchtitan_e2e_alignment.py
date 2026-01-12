@@ -1,4 +1,10 @@
 
+"""
+Description: Test Torchtitan vs OmniFlow Alignment
+Limitations:
+- currently only test on tiny config & aligned with bf16 precision(model & timestep
+"""
+
 import os
 import sys
 import torch
@@ -15,8 +21,6 @@ logger = logging.getLogger(__name__)
 # Paths
 ROOT_PATH = dirname(dirname(abspath(__file__)))
 print(ROOT_PATH)
-# OMNIFLOW_PATH = "/root/zirui/code/OmniFlow/src"
-# TORCHTITAN_PATH = "/root/zirui/code/OmniFlow/third_party/torchtitan"
 OMNIFLOW_PATH = join(ROOT_PATH, "src")
 TORCHTITAN_PATH = join(ROOT_PATH, "third_party", "torchtitan")
 
@@ -186,7 +190,7 @@ class TestTorchtitanOmniFlowAlignment(unittest.TestCase):
              wan_loss = MockWanLoss(self.tt_model.scheduler)
              
              # Ensure precision sync
-            #  self.tt_model.scheduler.timesteps = self.tt_model.scheduler.timesteps.bfloat16()
+             self.tt_model.scheduler.timesteps = self.tt_model.scheduler.timesteps.bfloat16()
              
              # Run TT
              noise_pred, target, timestep = self.tt_model(video, input_ids=ids, attention_mask=mask)
@@ -200,7 +204,7 @@ class TestTorchtitanOmniFlowAlignment(unittest.TestCase):
              trainer.scheduler.set_timesteps(1000, training=True)
              
              # Match precision
-            #  trainer.scheduler.timesteps = trainer.scheduler.timesteps.bfloat16()
+             trainer.scheduler.timesteps = trainer.scheduler.timesteps.bfloat16()
              
              omni_inputs = {
                 "video": video,

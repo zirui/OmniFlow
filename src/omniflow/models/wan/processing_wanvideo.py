@@ -1,6 +1,7 @@
 import warnings
 from typing import Any, Dict, List, Optional, Union
 
+import os
 import numpy as np
 import torch
 from PIL import Image
@@ -63,7 +64,25 @@ class WanVideoImageProcessor(BaseImageProcessor):
         from PIL import Image as PILImage
 
         image = PILImage.fromarray(image.astype(np.uint8))
-        image = image.resize((size["width"], size["height"]), PILImage.LANCZOS)
+        # TODO: Here, we align with DiffSynth's resize logic for debugging(may remove in the future)
+        if os.getenv("ALIGN_WITH_DIFFSYNTH") == "1":
+            # Match DiffSynth logic: scale based on max dimension ratio
+            width, height = image.size
+            target_width = size["width"]
+            target_height = size["height"]
+            
+            scale = max(target_width / width, target_height / height)
+            new_width = round(width * scale)
+            new_height = round(height * scale)
+            
+            from torchvision.transforms import functional as F
+            from torchvision.transforms import InterpolationMode
+            
+            # DiffSynth uses torchvision.transforms.resize with BILINEAR
+            # We must use F.resize to match exactly (antialias behavior etc)
+            image = F.resize(image, (new_height, new_width), interpolation=InterpolationMode.BILINEAR)
+        else:
+            image = image.resize((size["width"], size["height"]), PILImage.LANCZOS)
         return np.array(image)
 
     def center_crop(
@@ -107,6 +126,7 @@ class WanVideoImageProcessor(BaseImageProcessor):
         image_mean: Optional[Union[float, List[float]]] = None,
         image_std: Optional[Union[float, List[float]]] = None,
         do_convert_rgb: Optional[bool] = None,
+        num_frames: Optional[int] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
@@ -198,12 +218,38 @@ class WanVideoImageProcessor(BaseImageProcessor):
         # Stack frames for video
         processed_images = np.stack(processed_images, axis=0)  # B, T, H, W, C
 
+        # Temporal Handling (Interpolate or Truncate)
+        if num_frames is not None:
+             current_frames = processed_images.shape[1]
+             if current_frames > num_frames:
+                 logger.info(f"Truncating video frames from {current_frames} to {num_frames}")
+                 processed_images = processed_images[:, :num_frames, ...]
+             elif current_frames < num_frames:
+                 logger.info(f"Interpolating video frames from {current_frames} to {num_frames}")
+                 # Interpolate requires (B, C, T, H, W) or (B, C, H, W) - we have (B, T, H, W, C)
+                 # Permute to (B, C, T, H, W) for interpolate
+                 vid_tensor = torch.from_numpy(processed_images).permute(0, 4, 1, 2, 3)
+                 
+                 # Interpolate
+                 vid_tensor = torch.nn.functional.interpolate(
+                     vid_tensor, 
+                     size=(num_frames, vid_tensor.shape[3], vid_tensor.shape[4]), 
+                     mode='trilinear', 
+                     align_corners=False
+                 )
+                 
+                 # Permute back to (B, T, H, W, C) and convert to numpy
+                 processed_images = vid_tensor.permute(0, 2, 3, 4, 1).numpy()
+
         # Convert to tensor if requested
         if return_tensors == "pt":
             processed_images = torch.from_numpy(processed_images)
-            # Rearrange to (C, T, H, W) for video
-            # if len(processed_images.shape) == 4:  # (T, H, W, C)
-            #     processed_images = processed_images.permute(3, 0, 1, 2)
+            # Rearrange to (B, C, T, H, W) for video (since input was B, T, H, W, C)
+            if processed_images.ndim == 5:
+                processed_images = processed_images.permute(0, 4, 1, 2, 3)
+            elif processed_images.ndim == 4:
+                # (T, H, W, C) -> (C, T, H, W) if it was list of frames
+                processed_images = processed_images.permute(3, 0, 1, 2)
             # Add batch dimension
             # processed_images = processed_images.unsqueeze(0)
 
@@ -232,6 +278,7 @@ class WanVideoProcessor:
         if tokenizer is None:
             # Default to T5 tokenizer for text encoding
             try:
+                print("[Debug-processor], loading default tokenizer: google/umt5-xxl")
                 tokenizer = AutoTokenizer.from_pretrained("google/umt5-xxl")
             except:
                 logger.warning("Could not load default tokenizer, using None")

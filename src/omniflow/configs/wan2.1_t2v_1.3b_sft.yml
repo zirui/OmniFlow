@@ -45,12 +45,10 @@ model_config:
 
     # dit_has_image_pos_emb: False
     # dit_has_ref_conv: False
-    # dit_add_control_adapter: False
-    # dit_in_channels_control_adapter: 24
-    # seperated_timestep: True
+    seperated_timestep: False
     # require_clip_embedding: False
     # require_vae_embedding: False
-    # fuse_vae_embedding_in_latents: True
+    fuse_vae_embedding_in_latents: False
     trainable_modules: 'dit'
     vae_type: wan_video_vae
 

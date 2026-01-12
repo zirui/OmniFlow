@@ -1071,7 +1071,8 @@ class VideoVAE_(nn.Module):
 
     def reparameterize(self, mu, log_var):
         std = torch.exp(0.5 * log_var)
-        eps = torch.randn_like(std)
+        # eps = torch.randn_like(std)
+        eps = torch.randn_like(std, device='cpu').to(std.device)
         return eps * std + mu
 
     def sample(self, imgs, deterministic=False):
@@ -1079,7 +1080,8 @@ class VideoVAE_(nn.Module):
         if deterministic:
             return mu
         std = torch.exp(0.5 * log_var.clamp(-30.0, 20.0))
-        return mu + std * torch.randn_like(std)
+        # return mu + std * torch.randn_like(std)
+        return mu + std * torch.randn_like(std, device='cpu').to(std.device)
 
     def clear_cache(self):
         self._conv_num = count_conv3d(self.decoder)

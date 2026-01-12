@@ -1,0 +1,69 @@
+[job]
+description = "Wan2.1 1.3b T2V Training"
+dump_folder = "./outputs/wan2.1_t2v_1.3b_align_debug"
+custom_config_module = "torchtitan.experiments.wan.job_config"
+
+[model]
+name = "wan"
+flavor = "wan2.1_t2v_1.3b"
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = true
+
+[training]
+# global_batch_size = 4
+# global_batch_size = 1
+local_batch_size = 1
+# local_batch_size = 2
+max_norm = 1.0
+mixed_precision_param = "bfloat16"
+steps = 1000
+enable_cpu_offload = false
+
+# dataset = "example_video"
+# dataset = "vidgen-1m"
+dataset = "UltraVideo"
+load_from_pretrained_path = "/zirui/models/Wan2.1-T2V-1.3B"
+
+[encoder]
+# max_t5_encoding_len = 256
+t5_checkpoint_path = "/zirui/models/Wan2.1-T2V-14B/models_t5_umt5-xxl-enc-bf16.pth"
+vae_checkpoint_path = "/zirui/models/Wan2.1-T2V-14B/Wan2.1_VAE.pth"
+vae_type = "wan_video_vae"
+
+[optimizer]
+name = "AdamW"
+# lr = 5e-6
+lr = 1e-5
+eps = 1e-8
+beta1 = 0.9
+beta2 = 0.999
+weight_decay = 0.01
+
+[lr_scheduler]
+# decay_type = "cosine"
+# warmup_steps = 1000
+decay_type = "constant"
+warmup_steps = 0
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1    # Full Shard
+tensor_parallel_degree = 1
+pipeline_parallel_degree = 1
+
+[activation_checkpoint]
+mode = "full"
+
+[checkpoint]
+# enable = true
+enable = false
+interval = 100
+export_dtype = "float32"
+
+[validation]
+enable = false

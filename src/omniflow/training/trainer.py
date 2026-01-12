@@ -1,9 +1,9 @@
 """Custom HF trainer for diffusion training.
 """
 
-import math
-import types
+
 from typing import Any, Optional, Union
+import os
 
 import torch
 import torch.nn as nn
@@ -13,7 +13,7 @@ from transformers import TrainerCallback
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from schedulers.flow_match import FlowMatchScheduler
-from utils.train_utils import get_memory
+from utils.train_utils import get_memory, set_seed
 
 
 class WanVideoCallback(TrainerCallback):
@@ -57,6 +57,16 @@ class WanVideoTrainer(HFTrainer):
         self.scheduler = FlowMatchScheduler(shift=5, sigma_min=0.0, extra_one_step=True)
         self.scheduler.set_timesteps(1000, training=True)
         logger.info(f"Setting timesteps for diffusion training: {len(self.scheduler.timesteps)} steps")
+        
+        # Global seeding if FIXED_SEED is set
+        if os.environ.get("FIXED_SEED"):
+            try:
+                # TODO: zirui, fixed global seed for debugging
+                seed = int(os.environ["FIXED_SEED"])
+                set_seed(seed)
+                logger.info(f"Global seed set to {seed}")
+            except ValueError:
+                raise ValueError("FIXED_SEED must be an integer")
 
     def compute_loss(
         self,
@@ -97,39 +107,58 @@ class WanVideoTrainer(HFTrainer):
             "input_image": pixel_values.select(2, 0) if pixel_values.ndim == 5 else pixel_values[0],
             "cfg_scale": inputs.get("cfg_scale", 1),
             "cfg_merge": inputs.get("cfg_merge", False),
-            "vace_scale": inputs.get("vace_scale", 1),
-            "seed": inputs.get("seed", None),
-            "vace_reference_image": inputs.get("vace_reference_image", None),
+            "seed": inputs.get("seed", None), 
             "reference_image": inputs.get("reference_image", None),
             "tiled": inputs.get("tiled", False),
             "tile_size": inputs.get("tile_size", None),
             "tile_stride": inputs.get("tile_stride", None),
             "end_image": inputs.get("end_image", None),
-            "camera_control_direction": inputs.get("camera_control_direction", None),
-            "camera_control_speed": inputs.get("camera_control_speed", None),
-            "camera_control_origin": inputs.get("camera_control_origin", None),
-            "control_video": inputs.get("control_video", None),
-            "motion_bucket_id": inputs.get("motion_bucket_id", None),
-            "vace_video": inputs.get("vace_video", None),
-            "vace_video_mask": inputs.get("vace_video_mask", None),
         }
         
+        # Override seed if FIXED_SEED is set
+        if os.environ.get("FIXED_SEED"):
+            try:
+                fixed_seed = int(os.environ["FIXED_SEED"])
+                # logger.info(f"Using FIXED_SEED: {fixed_seed}") # Commented out to avoid spamming logs
+            except ValueError:
+                raise ValueError(f"Invalid FIXED_SEED value: {os.environ['FIXED_SEED']}")
+            inputs_dict["seed"] = fixed_seed
+        
         # Sample random timestep
-        max_timestep_boundary = int(1 * self.scheduler.num_train_timesteps)
-        min_timestep_boundary = int(0 * self.scheduler.num_train_timesteps)
-        timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
+        if os.environ.get("FIXED_TIMESTEP"):
+            try:
+                fixed_step = int(os.environ["FIXED_TIMESTEP"])
+                max_step = self.scheduler.num_train_timesteps - 1
+                if fixed_step < 0 or fixed_step > max_step:
+                     logger.warning(f"FIXED_TIMESTEP {fixed_step} out of range [0, {max_step}]. Clamping.")
+                     fixed_step = max(0, min(fixed_step, max_step))
+                
+                timestep_id = torch.tensor([fixed_step], device=self.scheduler.timesteps.device)
+                logger.info(f"Using FIXED_TIMESTEP: {fixed_step}")
+            except ValueError:
+                raise ValueError(f"Invalid FIXED_TIMESTEP value: {os.environ['FIXED_TIMESTEP']}")
+        else:
+            max_timestep_boundary = int(1 * self.scheduler.num_train_timesteps)
+            min_timestep_boundary = int(0 * self.scheduler.num_train_timesteps)
+            timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
+            
         timestep = self.scheduler.timesteps[timestep_id]
 
         # Preprocess inputs (encode video, text, etc.)
         if isinstance(model, FSDP):
             with FSDP.summon_full_params(model, writeback=False, rank0_only=False):
                 pre_precessed_inputs = model.forward_preprocess(self.scheduler, inputs_dict)
+                # Get model dtype for timestep casting
+                model_dtype = model.dtype
         else:
             # TODO: zirui, fix ddp bug
             model = model.module if hasattr(model, "module") else model
             pre_precessed_inputs = model.forward_preprocess(self.scheduler, inputs_dict)
-            # pre_precessed_inputs = model.forward_preprocess(self.scheduler, inputs_dict)
-        
+            model_dtype = next(model.parameters()).dtype
+            
+        # Cast timestep to model dtype (MATCHES DiffSynth behavior: 833.33 -> 832.0 if bf16)
+        timestep = timestep.to(dtype=model_dtype)
+
         # Compute training target
         training_target = self.scheduler.training_target(
             pre_precessed_inputs["input_latents"],
@@ -152,14 +181,21 @@ class WanVideoTrainer(HFTrainer):
             y=pre_precessed_inputs.get("y", None),
             reference_latents=pre_precessed_inputs.get("reference_latents", None),
             clip_feature=pre_precessed_inputs.get("clip_feature", None),
-            vace_context=pre_precessed_inputs.get("vace_context", None),
-            vace_scale=pre_precessed_inputs.get("vace_scale", 1.0),
-            motion_bucket_id=pre_precessed_inputs.get("motion_bucket_id", None),
-            control_camera_latents_input=pre_precessed_inputs.get("control_camera_latents_input", None),
         )
         
         # Compute MSE loss
         noise_pred = output.noise_pred
+        
+        # TODO: zirui, for debugging 
+        if os.getenv("DEBUG") == "1" and self.state.global_step % 1 == 0:
+            weight = self.scheduler.training_weight(timestep)
+            logger.info(f"DEBUG: Step={self.state.global_step} Timestep={timestep.item():.4f} Weight={weight.item():.4f}")
+            logger.info(f"DEBUG: Video Min={pixel_values.min().item():.4f} Max={pixel_values.max().item():.4f}")
+            logger.info(f"DEBUG: Pred Mean={noise_pred.mean().item():.4f} Std={noise_pred.std().item():.4f}")
+            logger.info(f"DEBUG: Target Mean={training_target.mean().item():.4f} Std={training_target.std().item():.4f}")
+            raw_loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float(), reduction="mean")
+            logger.info(f"DEBUG: Raw MSE={raw_loss.item():.6f}")
+            
         loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float(), reduction="mean")
         loss = loss * self.scheduler.training_weight(timestep)
         return loss

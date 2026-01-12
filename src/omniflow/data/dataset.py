@@ -85,6 +85,9 @@ class WanVideoDataset(BaseDataset):
     def _load_metadata(self) -> List[Dict]:
         """Load metadata from JSONL or CSV file."""
         samples = []
+        # TODO: add dummy data for debugging
+        if self.data_path.name == "dummy.jsonl":
+            return samples
         
         if self.data_path.suffix == '.jsonl':
             with open(self.data_path, 'r') as f:
@@ -111,8 +114,46 @@ class WanVideoDataset(BaseDataset):
             return self.load_video_decord(video_path, fps)
         elif self.config.video_backend == "qwen_vl_utils":
             return self.load_video_qwen_vl_utils(video_path, fps)
+        elif self.config.video_backend == "imageio":
+             return self.load_video_imageio(video_path, fps)
         else:
             raise ValueError(f"Unsupported video backend: {self.config.video_backend}")
+
+    def load_video_imageio(self, video_path, fps):
+        import imageio
+        reader = imageio.get_reader(video_path)
+        
+        # Sampling Strategy
+        total_frames = reader.count_frames()
+        total_frames = int(total_frames)
+        
+        if self.config.video_sampling_strategy == "frame_num":
+            nframes = self.config.frame_num
+            # Enforce VAE divisibility: (n - 1) % 4 == 0
+            actual_nframes = min(nframes, total_frames)
+            
+            if actual_nframes > 1:
+                valid_nframes = ((actual_nframes - 1) // 4) * 4 + 1
+            else:
+                valid_nframes = 1
+                
+            # DiffSynth Sequential Reading
+            frames = []
+            for i, frame in enumerate(reader):
+                if i >= valid_nframes:
+                    break
+                frames.append(frame)
+            
+            # Stack to numpy (T, H, W, C)
+            frames = np.array(frames)
+            sample_fps = fps # Simplification
+            
+            reader.close()
+        else:
+             reader.close()
+             raise NotImplementedError("Only frame_num strategy implemented for imageio backend")
+             
+        return frames, sample_fps
 
     def load_video_decord(
         self,
@@ -139,15 +180,35 @@ class WanVideoDataset(BaseDataset):
         total_frames, video_fps = len(vr), vr.get_avg_fps()
         if self.config.video_sampling_strategy == "fps":
             nframes = smart_nframes(total_frames, video_fps=video_fps, fps=fps)
+            # Maintain uniform sampling for FPS strategy 
+            uniform_sampled_frames = np.linspace(0, total_frames - 1, nframes, dtype=int)
         elif self.config.video_sampling_strategy == "frame_num":
             nframes = self.config.frame_num
+            # Enforce VAE divisibility: (n - 1) % 4 == 0
+            actual_nframes = min(nframes, total_frames)
+            
+            if actual_nframes > 1:
+                valid_nframes = ((actual_nframes - 1) // 4) * 4 + 1
+            else:
+                valid_nframes = 1
+                
+            if os.getenv("ALIGN_WITH_DIFFSYNTH") == "1":
+                # sequential sampling align with diffsynth
+                uniform_sampled_frames = np.arange(valid_nframes, dtype=int)
+            else:
+                # uniform sampling
+                uniform_sampled_frames = np.linspace(0, total_frames - 1, valid_nframes, dtype=int)
         else:
             raise ValueError(f"Invalid video sampling strategy: {self.config.video_sampling_strategy}")
-        uniform_sampled_frames = np.linspace(0, total_frames - 1, nframes, dtype=int)
+            
         frame_idx = uniform_sampled_frames.tolist()
         spare_frames = vr.get_batch(frame_idx).asnumpy()
-        spare_frames = torch.tensor(spare_frames).permute(0, 3, 1, 2)  # Convert to TCHW format
+        # spare_frames = torch.tensor(spare_frames).permute(0, 3, 1, 2)  # Convert to TCHW format
+        
+        # Calculate sample_fps
         sample_fps = nframes / max(total_frames, 1e-6) * video_fps
+        
+        # Return HWC numpy array to match processor expectations
         return spare_frames, sample_fps  # (frames, height, width, channels)
 
     def load_video_qwen_vl_utils(
@@ -173,22 +234,39 @@ class WanVideoDataset(BaseDataset):
             "max_frames": self.config.video_max_frames,
             "min_pixels": self.config.video_min_pixels,
         }
-        # print(f"{video_dict=}", flush=True)
 
         if self.config.video_sampling_strategy == "frame_num":
             is_even = self.config.frame_num % 2 == 0
             n_frames = self.config.frame_num if is_even else self.config.frame_num + 1
             video_dict["nframes"] = n_frames
+            
             frames, sample_fps = fetch_video(video_dict, return_video_sample_fps=True)
             frames = frames.numpy()
-            if is_even:
-                return frames, sample_fps
-            else:
-                return frames[:-1], sample_fps
+
+            # if is_even:
+            #     return frames, sample_fps
+            # else:
+            #     return frames[:-1], sample_fps
+            
+            # Enforce VAE divisibility constraint
+            actual_n = len(frames)
+            if actual_n > 1:
+                valid_n = ((actual_n - 1) // 4) * 4 + 1
+                frames = frames[:valid_n]
+            # else: keep 1 frame (or handle error)
+            
+            return frames, sample_fps
         elif self.config.video_sampling_strategy == "fps":
             video_dict["fps"] = fps
             frames, sample_fps = fetch_video(video_dict, return_video_sample_fps=True)
             frames = frames.numpy()
+            
+            # Also enforce for fps strategy
+            actual_n = len(frames)
+            if actual_n > 1:
+                valid_n = ((actual_n - 1) // 4) * 4 + 1
+                frames = frames[:valid_n]
+                
             return frames, sample_fps
         else:
             raise ValueError(f"Invalid video sampling strategy: {self.config.video_sampling_strategy}")
@@ -222,7 +300,8 @@ class WanVideoDataset(BaseDataset):
         processed = self.processor.process(
             images=None,
             hf_messages=hf_messages,
-            videos=[video_frames]
+            videos=[video_frames],
+            num_frames=self.config.frame_num
         )
         
         return processed

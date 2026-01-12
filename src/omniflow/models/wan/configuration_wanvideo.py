@@ -13,8 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict 
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -53,8 +52,6 @@ class WanVideoConfig(PretrainedConfig):
         dit_has_image_input: bool = False,
         dit_has_image_pos_emb: bool = False,
         dit_has_ref_conv: bool = False,
-        dit_add_control_adapter: bool = False,
-        dit_in_channels_control_adapter: int = 24,
         trainable_modules=None,
         seperated_timestep: bool = True,
         require_clip_embedding: bool = False,
@@ -80,8 +77,6 @@ class WanVideoConfig(PretrainedConfig):
 
         self.dit_has_image_pos_emb = dit_has_image_pos_emb
         self.dit_has_ref_conv = dit_has_ref_conv
-        self.dit_add_control_adapter = dit_add_control_adapter
-        self.dit_in_channels_control_adapter = dit_in_channels_control_adapter
 
         self.seperated_timestep = seperated_timestep
         self.require_clip_embedding = require_clip_embedding

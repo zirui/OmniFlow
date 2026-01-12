@@ -6,12 +6,25 @@ A flexible training framework for multi-modality.
 - **Flexible**: Supports training from scratch or fine-tuning from pretrained checkpoints.
 - **Configurable**: Simple YAML configuration.
 
+
+
+
 - Models
 
 | model  | deepspeed  | FSDP  |CP  | Ulysses  |USP|
 |---|---|---|---|---|--|
 | Wan2  | ✅  | ✅  | ❌  | ❌ |❌ |
 | Hunyuan-video  |   |   |   |   ||
+
+
+## difussion training
+```
+Text ─▶ Encoder ─┐
+                  ├─▶ Denoiser(z_t, t) ─▶ Loss ─▶ Optimizer
+Video ─▶ VAE ─▶ z_t
+```
+
+
 
 ## TODO:
 1. **Parallism**

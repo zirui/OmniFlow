@@ -414,7 +414,8 @@ def fetch_video(ele: Dict[str, Any], image_patch_size: int = 14, return_video_sa
         try:
             video, video_metadata, sample_fps = VIDEO_READER_BACKENDS[video_reader_backend](ele)
         except Exception as e:
-            logger.warning(f"video_reader_backend {video_reader_backend} error, use torchvision as default, msg: {e}")
+            # logger.warning(f"video_reader_backend {video_reader_backend} error, use torchvision as default, msg: {e}")
+            logger.warning(f"video_reader_backend {video_reader_backend} error, for {ele=} use torchvision as default, msg: {e}")
             video, video_metadata, sample_fps = VIDEO_READER_BACKENDS["torchvision"](ele)
     else:
         # The input is a list of frames

@@ -43,7 +43,8 @@ def get_dataset(dataset_path, dataset_format, data_folder=""):
         data_folder=data_folder,
         dataset_path=dataset_path,
         video_sampling_strategy="frame_num",
-        frame_num=49,
+        # frame_num=49,
+        frame_num=81,
         shuffle=False,
         video_backend="qwen_vl_utils",
         processor_config=processor_config,
@@ -54,6 +55,12 @@ def get_dataset(dataset_path, dataset_format, data_folder=""):
 def get_example_video_dataset():
     return get_dataset("/root/zirui/data/example_video_dataset/metadata.jsonl", "jsonl")
 
+def get_ultra_video_dataset():
+    # return get_dataset("/root/zirui/data/UltraVideo/clips_short_1920_brief_example.jsonl", 
+    return get_dataset("/root/zirui/data/UltraVideo/clips_short_1920_brief_example_1k.jsonl", 
+    "jsonl",
+    "/root/zirui/data/UltraVideo/clips_short_1920/clips_short_1920"
+    )
 
 def get_vidgen_1m_dataset():
     return get_dataset(
@@ -65,6 +72,7 @@ def get_vidgen_1m_dataset():
 
 MM_DATASETS = {
     "example_video": get_example_video_dataset(),
+    "UltraVideo": get_ultra_video_dataset(),
     "vidgen-1m": get_vidgen_1m_dataset(),
 }
 

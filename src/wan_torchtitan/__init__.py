@@ -19,6 +19,8 @@ wan_args = {
         dit_intermediate_size=8960,
         dit_in_channels=16,
         dit_out_channels=16,
+        fuse_vae_embedding_in_latents=False,
+        seperated_timestep=False,
     ),
     "wan2.1_t2v_1.3b": WanModelArgs(
         dit_hidden_size=1536,
@@ -27,6 +29,8 @@ wan_args = {
         dit_intermediate_size=8960,
         dit_in_channels=16,
         dit_out_channels=16,
+        fuse_vae_embedding_in_latents=False,
+        seperated_timestep=False,
     ),
     "wan2.1_t2v_14b": WanModelArgs(
         dit_hidden_size=5120,
@@ -35,6 +39,8 @@ wan_args = {
         dit_intermediate_size=13824,
         dit_in_channels=16,
         dit_out_channels=16,
+        fuse_vae_embedding_in_latents=False,
+        seperated_timestep=False,
     ),
     "wan2.2_t2v_debug": WanModelArgs(
         dit_hidden_size=3072,
