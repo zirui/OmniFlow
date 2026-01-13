@@ -107,7 +107,6 @@ trainer_args:
     limit_all_gathers: true
     activation_checkpointing: true
     gradient_checkpointing: true
-  fsdp_transformer_layer_cls_to_wrap: "DiTBlock"
   fsdp_transformer_layer_cls_to_wrap: "DiTBlock,WanTextEncoder,WanVideoVAE"
   
   # attn_implementation: "flash_attention_2" 
