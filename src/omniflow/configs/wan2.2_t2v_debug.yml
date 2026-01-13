@@ -27,7 +27,7 @@ dataset_config:
 model_config:
   # load_from_config:
   # load_from_pretrained_path: "your_path_to_model"
-  model_type: wanvideo
+  # model_type: wanvideo
   config:
     # DiT model parameters
     dit_hidden_size: 3072
@@ -60,7 +60,7 @@ model_config:
   
 # Training arguments
 trainer_args:
-  output_dir: "./output/wan2.2_ti2v_5b"
+  output_dir: "./output/wan2.2_ti2v_debug"
   num_train_epochs: 10000 # you dont have to set it like this, just for demo
   per_device_train_batch_size: 2
   per_device_eval_batch_size: 2
@@ -79,10 +79,7 @@ trainer_args:
   dataloader_num_workers: 4
 
   report_to: none
-  # use_wandb: false
-  # wandb_project: t2v-debug
-  # wandb_name: wan_i2v_14b
-  run_name: wan2.2_t2v-5b-mi355-vidgen-0
+  run_name: wan2.2_t2v-debug
 
   fp16: false
   bf16: true
@@ -108,4 +105,5 @@ trainer_args:
     sync_module_states: true
     limit_all_gathers: true
     activation_checkpointing: true
+  fsdp_transformer_layer_cls_to_wrap: "DiTBlock,WanTextEncoder,WanVideoVAE38"
   

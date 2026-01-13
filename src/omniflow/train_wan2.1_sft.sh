@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# CONFIG="configs/wan2.2_t2v_5b.yml"
-CONFIG="configs/wan2.2_t2v_debug.yml"
+CONFIG="configs/wan2.1_t2v_1.3b_sft.yml" 
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-3}
 NNODES=${NNODES:-1}
