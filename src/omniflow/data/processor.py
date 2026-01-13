@@ -91,8 +91,7 @@ class WanVideoDataProcessor:
                 num_frames=kwargs.get('num_frames', None),
                 return_tensors="pt",
             )
-            # TODO: zirui, temporarily convert to bfloat16 for debugging(fix video max discrepancy issue)
-            pixel_values = video_inputs["pixel_values"].to(torch.bfloat16)
+            pixel_values = video_inputs["pixel_values"]
         else:
             raise ValueError("No video frames provided")
 

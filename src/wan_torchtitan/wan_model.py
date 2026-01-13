@@ -54,7 +54,9 @@ class WanVideoModel(nn.Module, ModelProtocol):
                 vae_state_dict = new_vae_state_dict
 
             self.model.vae.load_state_dict(vae_state_dict, strict=True, assign=True)
-            print("VAE loaded.")
+            # EXPLICITLY CAST TO BF16
+            self.model.vae.to(torch.bfloat16)
+            print("VAE loaded and cast to bfloat16.")
 
         if self.model_args.t5_checkpoint_path:
             print(f"Loading T5 from {self.model_args.t5_checkpoint_path}")
@@ -62,7 +64,9 @@ class WanVideoModel(nn.Module, ModelProtocol):
                 self.model_args.t5_checkpoint_path, map_location="cpu"
             )
             self.model.text_encoder.load_state_dict(t5_state_dict, strict=True, assign=True)
-            print("T5 loaded.")
+            # EXPLICITLY CAST TO BF16
+            self.model.text_encoder.to(torch.bfloat16)
+            print("T5 loaded and cast to bfloat16.")
 
     def init_weights(self, buffer_device=None):
         """Initialize model weights."""

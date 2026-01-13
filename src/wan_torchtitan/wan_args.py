@@ -34,7 +34,7 @@ class WanModelArgs(BaseModelArgs):
     def update_from_config(self, job_config, **kwargs) -> None:
         # Update args from job_config if needed.
         if hasattr(job_config, "encoder"):
-            self.mixed_precision_param = job_config.encoder.mixed_precision_param if hasattr(job_config.encoder, 'mixed_precision_param') else self.mixed_precision_param
+            self.mixed_precision_param = job_config.training.mixed_precision_param if hasattr(job_config.training, 'mixed_precision_param') else self.mixed_precision_param
             self.vae_checkpoint_path = job_config.encoder.vae_checkpoint_path
             self.vae_type = job_config.encoder.vae_type
             self.t5_checkpoint_path = job_config.encoder.t5_checkpoint_path

@@ -16,13 +16,7 @@ from omniflow.data import WanVideoDataset, WanVideoDataProcessor, DatasetConfig
 
 
 def get_dataset(dataset_path, dataset_format, data_folder=""):
-    # dataset_path = job_config.training.dataset
-    # if not dataset_path:
-    #     dataset_path = "/root/zirui/data/example_video_dataset/metadata.jsonl"
-
     processor_config = {
-        "processor_name": "WanVideo/Wan2.1-T2V-3B",
-        "processor_type": "wanvideo",
         "extra_kwargs": {
             "do_resize": True,
             "size": {"height": 480, "width": 832},
@@ -31,11 +25,10 @@ def get_dataset(dataset_path, dataset_format, data_folder=""):
             "image_std": [0.5, 0.5, 0.5],
         },
     }
-
     processor = WanVideoDataProcessor(processor_config)
     processor.build()
 
-    print(f"haha {dataset_path=}", flush=True)
+    print(f"{dataset_path=}", flush=True)
 
     dataset_cfg = DatasetConfig(
         dataset_type="vision",
@@ -46,7 +39,8 @@ def get_dataset(dataset_path, dataset_format, data_folder=""):
         # frame_num=49,
         frame_num=81,
         shuffle=False,
-        video_backend="qwen_vl_utils",
+        # video_backend="qwen_vl_utils",
+        video_backend="imageio",
         processor_config=processor_config,
     )
     return dataset_path, processor, dataset_cfg
@@ -126,24 +120,19 @@ def build_wan_dataloader(
     tokenizer,  # Unused
     job_config: JobConfig,
 ) -> BaseDataLoader:
-    # dataset_path = job_config.training.dataset
-    # if not dataset_path:
-    #     dataset_path = "/root/zirui/data/example_video_dataset/metadata.jsonl"
+    """
+    # Build processor
+    processor_config = job_config.processor
+    # processor_config = dataset_config['processor_config']
+    processor = WanVideoDataProcessor(processor_config)
+    processor.build()
 
-    # processor_config = {
-    #     "processor_name": "WanVideo/Wan2.1-T2V-3B",
-    #     "processor_type": "wanvideo",
-    #     "extra_kwargs": {
-    #         "do_resize": True,
-    #         "size": {"height": 480, "width": 832},
-    #         "do_normalize": True,
-    #         "image_mean": [0.5, 0.5, 0.5],
-    #         "image_std": [0.5, 0.5, 0.5],
-    #     }
-    # }
-
-    # processor = WanVideoDataProcessor(processor_config)
-    # processor.build()
+    # Build dataset
+    dataset = WanVideoDataset(
+        processor=processor,
+        config = DatasetConfig(**dataset_config)
+    )
+    dataset.build()
 
     # dataset_cfg = DatasetConfig(
     #     dataset_type="vision"
@@ -156,6 +145,7 @@ def build_wan_dataloader(
     #     video_backend="qwen_vl_utils",
     #     processor_config=processor_config
     # )
+    """
 
     # Get dataset by name
     dataset_name = job_config.training.dataset
@@ -165,7 +155,6 @@ def build_wan_dataloader(
         processor=processor, config=dataset_cfg
     )
     dataset.build()
-
 
     sampler = torch.utils.data.DistributedSampler(
         dataset,

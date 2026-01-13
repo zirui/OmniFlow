@@ -26,10 +26,9 @@ class WanTrainer(Trainer):
         super().__init__(job_config)
         # TOOD: zirui, Re-initialize deterministic mode if needed (Flux does it for specific reasons, we might too)
         
-        # Global seeding if FIXED_SEED is set(for debugging, will be removed)
+        # TODO: zirui, Global seeding if FIXED_SEED is set(for debugging, will be removed)
         if os.environ.get("FIXED_SEED"):
             try:
-                # TODO: zirui, fixed global seed for debugging
                 seed = int(os.environ["FIXED_SEED"])
                 random.seed(seed)
                 np.random.seed(seed)
@@ -40,15 +39,13 @@ class WanTrainer(Trainer):
                 raise ValueError("FIXED_SEED must be an integer")
 
         logger.info(f"Building Wan Model using local experiment definition")
-        self._dtype = (
-            TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
-            if self.parallel_dims.dp_shard_enabled
-            else torch.float32
-        )
+        self._dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
         
         # Parse Args
         model_args = self.train_spec.model_args[job_config.model.flavor]
-        print(f"haha, {model_args=}", flush=True)
+
+        logger.info(f"{job_config=}")
+        logger.info(f"{model_args=}")
         
         # clean up existing model from Trainer init (if any)
         if hasattr(self, 'model_parts'):
@@ -58,10 +55,10 @@ class WanTrainer(Trainer):
 
         logger.info(f"Building custom Wan model...")
         
-        with utils.set_default_dtype(self._dtype):
+        with utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]):
              pretrained_path = job_config.training.load_from_pretrained_path
              model = WanVideoModel(model_args, pretrained_dit_path=pretrained_path)
-        
+             
         # Parallelize
         model = parallelize_wan(model, self.parallel_dims, job_config)
         

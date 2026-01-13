@@ -78,17 +78,6 @@ def build_model(model_config: dict):
     total_params, trainable_params = count_parameters(model)
     logger.info(f"parameters after loading encoder weights: total_params={total_params/1e9:.2f}B, trainable_params={trainable_params/1e9:.2f}B")
 
-    # Cast model to specified dtype
-    if 'model_dtype' in model_config:
-        dtype_str = model_config['model_dtype']
-        logger.info(f"Casting model to {dtype_str}")
-        if dtype_str == 'bfloat16':
-            model.to(torch.bfloat16)
-        elif dtype_str == 'float16':
-            model.to(torch.float16)
-        elif dtype_str == 'float32':
-            model.to(torch.float32)
-
     # logger.info("Applying CPU Offloading: Casting encoders to bfloat16 and concealing from FSDP...")
      # # --- CPU Offloading & FSDP Hiding ---
     
@@ -163,6 +152,10 @@ def load_encoder_weights(model, config):
             # Check if model.text_encoder handles the loading or we load directly
             keys_result = model.text_encoder.load_state_dict(state_dict, strict=False)
             logger.info(f"T5 Encoder loaded. Missing keys: {len(keys_result.missing_keys)}, Unexpected keys: {len(keys_result.unexpected_keys)}")
+
+            # EXPLICITLY CAST TO BF16
+            model.text_encoder.to(torch.bfloat16)
+            logger.info("T5 loaded and cast to bfloat16.")
         except Exception as e:
             logger.error(f"Failed to load T5 Encoder: {e}")
             
@@ -182,6 +175,9 @@ def load_encoder_weights(model, config):
             
             keys_result = model.vae.load_state_dict(state_dict, strict=False)
             logger.info(f"VAE loaded. Missing keys: {len(keys_result.missing_keys)}, Unexpected keys: {len(keys_result.unexpected_keys)}")
+            # EXPLICITLY CAST TO BF16
+            model.vae.to(torch.bfloat16)
+            logger.info("VAE loaded and cast to bfloat16.")
             
         except Exception as e:
              logger.error(f"Failed to load VAE: {e}")
