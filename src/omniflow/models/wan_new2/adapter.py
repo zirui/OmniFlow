@@ -31,6 +31,9 @@ class WanNew2ConfigShim:
         with open(path, "w") as f:
             json.dump(self.raw, f, indent=2, sort_keys=True)
 
+    def to_dict(self):
+        return self.raw
+
 
 class WanNew2ForTraining(GenAIModel, nn.Module):
     """
@@ -99,6 +102,13 @@ class WanNew2ForTraining(GenAIModel, nn.Module):
         else:
             # Conservative default: DiT only
             unfreeze(self.dit)
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        """
+        Activated by HF Trainer when `gradient_checkpointing=True`.
+        """
+        if self.dit and hasattr(self.dit, "gradient_checkpointing"):
+            self.dit.gradient_checkpointing = True
 
     def forward(self, *args, **kwargs):
         # Match existing trainer call convention: model(batch, scheduler)
