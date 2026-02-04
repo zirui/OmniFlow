@@ -3,15 +3,16 @@ from dataclasses import dataclass
 from typing import Any, Optional 
 
 import torch
+import torch.nn as nn
 
 from einops import repeat
 from loguru import logger
 import json
 import glob
 from safetensors.torch import load_file
-from transformers import PreTrainedModel
-from transformers.utils import ModelOutput
+import torch.distributed as dist
 
+from ..interface import GenAIModel
 from .configuration_wanvideo import WanVideoConfig
 from .wan_video_dit import WanDitModel, sinusoidal_embedding_1d
 from .wan_video_text_encoder import WanTextEncoder
@@ -21,28 +22,14 @@ PATTERN = "B C H W"
 
 
 @dataclass
-class WanVideoOutput(ModelOutput):
+class WanVideoOutput:
     noise_pred: Optional[torch.FloatTensor] = None
     text_embeddings: Optional[torch.FloatTensor] = None
 
 
-class WanVideoPreTrainedModel(PreTrainedModel):
-    config: WanVideoConfig
-    base_model_prefix = "model"
-    supports_gradient_checkpointing = True
-    # _no_split_modules = ["DiTBlock"]
-    # _skip_keys_device_placement = ["past_key_values"]
-    _supports_flash_attn = True
-    _supports_sdpa = True
-    # _supports_flex_attn = True
-
-    _can_compile_fullgraph = True
-    _supports_attention_backend = True
-
-
-class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
+class WanVideoForConditionalGeneration(GenAIModel, nn.Module):
     def __init__(self, config: WanVideoConfig):
-        super().__init__(config)
+        super().__init__()
         self.config = config
         # Main DiT model
         self.dit = WanDitModel(config)
@@ -54,6 +41,8 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             raise ValueError(f"Unsupported vae_type: {config.vae_type}")
             
         self.text_encoder = WanTextEncoder()
+        
+        self.is_gradient_checkpointing = False
 
         self.image_encoder = None
 
@@ -68,6 +57,32 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         self.time_division_factor = 4
         self.time_division_remainder = 1
         self.trainable_modules = config.trainable_modules
+
+    def save_pretrained(self, save_directory):
+        os.makedirs(save_directory, exist_ok=True)
+        # Save config
+        config_path = os.path.join(save_directory, "config.json")
+        with open(config_path, "w") as f:
+            json.dump(self.config.__dict__, f, indent=2)
+        
+        # Save state dict
+        model_path = os.path.join(save_directory, "diffusion_pytorch_model.safetensors")
+        from safetensors.torch import save_file
+        save_file(self.state_dict(), model_path)
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    @property
+    def dtype(self):
+        return next(self.parameters()).dtype
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        self.is_gradient_checkpointing = True
+        
+    def gradient_checkpointing_disable(self):
+        self.is_gradient_checkpointing = False
 
     def freeze_except(self):
         trainable_modules = [] if not self.trainable_modules else self.trainable_modules.split(",")
@@ -103,7 +118,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         video = [repeat(image, f"H W C -> {PATTERN}", **({"B": 1} if "B" in PATTERN else {})) for image in video]
         video = torch.stack(video, dim=pattern.index("T") // 2)
         return video
-
 
     def generate_noise(
         self,
@@ -266,7 +280,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         latents[:, :, 0:1] = z
         return latents, z
 
-
     def forward_preprocess(self, scheduler, data_inputs: dict[str, Any]):
         inputs = data_inputs
         height, width, num_frames = self.check_resize_height_width(
@@ -325,6 +338,7 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             inputs.update({"latents": noise})
         # might need to be checked.
         context = self.encode_prompt(inputs["input_ids"], inputs["attention_mask"], device=self.device)
+        context = context.to(self.dit.dtype)
         inputs.update({"context": context})
 
         # logger.info(f"OmniFlow Context Mean: {context.mean().item():.6f}, Std: {context.std().item():.6f}")
@@ -366,7 +380,130 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
 
         return inputs
 
-    def forward(
+    def forward(self, *args, **kwargs):
+        """
+        Dispatch method:
+        - If input is a dict (batch from implementation), call forward_train.
+        - Otherwise call forward_dit (legacy/inference).
+        """
+        if len(args) > 0 and isinstance(args[0], dict) and "video" in args[0]:
+            scheduler = args[1] if len(args) > 1 else kwargs.get("scheduler")
+            return self.forward_train(args[0], scheduler)
+        return self.forward_dit(*args, **kwargs)
+
+    def forward_train(self, batch: dict[str, Any], scheduler=None) -> dict[str, torch.Tensor]:
+        device = self.device
+        
+        # 1. Prepare Inputs
+        pixel_values = batch.get("video")
+        if pixel_values is None:
+            raise ValueError("Batch must contain 'video' key")
+
+        # Handle tensor movement if needed (though usually done by trainer/dataloader)
+        if isinstance(pixel_values, torch.Tensor) and pixel_values.device != device:
+             pixel_values = pixel_values.to(device, non_blocking=True)
+        
+        # Extract dims
+        if pixel_values.ndim == 5:
+            num_frames, height, width = pixel_values.shape[2:5]
+        else:
+            num_frames, height, width = pixel_values.shape[:3]
+
+        inputs_dict = {
+            "video": pixel_values,
+            "input_ids": batch.get("input_ids"),
+            "attention_mask": batch.get("attention_mask"),
+            "height": height,
+            "width": width,
+            "num_frames": num_frames,
+            # Keep consistent with DiffSynth-Studio TI2V training behavior:
+            # TI2V/I2V conditioning is only enabled when the batch explicitly provides `input_image`
+            # (e.g. via a dataset field or an "extra_inputs" mechanism in the training script).
+            "input_image": batch.get("input_image", None),
+            "cfg_scale": batch.get("cfg_scale", 1),
+            "cfg_merge": batch.get("cfg_merge", False),
+            "seed": batch.get("seed", None),
+            "reference_image": batch.get("reference_image", None),
+            "tiled": batch.get("tiled", False),
+            "tile_size": batch.get("tile_size", None),
+            "tile_stride": batch.get("tile_stride", None),
+            "end_image": batch.get("end_image", None),
+        }
+
+        # 2. Handle Fixed Seed
+        if os.environ.get("FIXED_SEED"):
+            try:
+                fixed_seed = int(os.environ["FIXED_SEED"])
+                inputs_dict["seed"] = fixed_seed
+            except ValueError:
+                raise ValueError(f"Invalid FIXED_SEED value: {os.environ['FIXED_SEED']}")
+
+        # 3. Handle Timestep Selection
+        if os.environ.get("FIXED_TIMESTEP"):
+            try:
+                fixed_step = int(os.environ["FIXED_TIMESTEP"])
+                max_step = scheduler.num_train_timesteps - 1
+                if fixed_step < 0 or fixed_step > max_step:
+                    logger.warning(f"FIXED_TIMESTEP {fixed_step} out of range [0, {max_step}]. Clamping.")
+                    fixed_step = max(0, min(fixed_step, max_step))
+                
+                timestep_id = torch.tensor([fixed_step], device=device)
+            except ValueError:
+                raise ValueError(f"Invalid FIXED_TIMESTEP value: {os.environ['FIXED_TIMESTEP']}")
+        else:
+            max_timestep_boundary = int(1 * scheduler.num_train_timesteps)
+            min_timestep_boundary = int(0 * scheduler.num_train_timesteps)
+            timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,), device=device)
+
+        timestep = scheduler.timesteps[timestep_id.cpu()]
+
+        # 4. Forward Preprocess (VAE, TextEnc, Noise Init)
+        # Note: forward_preprocess expects inputs_dict values to be on device if they are tensors
+        # We ensure generic tensor movement here for keys that might be tensors
+        for k, v in inputs_dict.items():
+            if isinstance(v, torch.Tensor) and v.device != device:
+                 inputs_dict[k] = v.to(device, non_blocking=True)
+        
+        with torch.no_grad():
+             pre_processed_inputs = self.forward_preprocess(scheduler, inputs_dict)
+        timestep = timestep.float()
+
+        # 5. Diffusion Target & Noise Injection
+        training_target = scheduler.training_target(
+            pre_processed_inputs["input_latents"],
+            pre_processed_inputs["noise"],
+            timestep,
+        )
+        pre_processed_inputs["latents"] = scheduler.add_noise(
+            pre_processed_inputs["input_latents"],
+            pre_processed_inputs["noise"],
+            timestep,
+        )
+
+        # 6. DiT Forward
+        output = self.forward_dit(
+            latents=pre_processed_inputs.get("latents", None),
+            context=pre_processed_inputs.get("context", None),
+            timestep=timestep,
+            y=pre_processed_inputs.get("y", None),
+            reference_latents=pre_processed_inputs.get("reference_latents", None),
+            clip_feature=pre_processed_inputs.get("clip_feature", None),
+            fuse_vae_embedding_in_latents=bool(pre_processed_inputs.get("fuse_vae_embedding_in_latents", False)),
+        )
+
+        noise_pred = output.noise_pred
+        
+        # 7. Loss Calculation
+        loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float(), reduction="mean")
+        weight = scheduler.training_weight(timestep)
+        loss = loss * weight
+
+        return {"loss": loss}
+
+    def forward_inference(self, batch: dict[str, Any], **kwargs):
+        pass
+
+    def forward_dit(
         self,
         latents,
         context,
@@ -374,11 +511,13 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         y: Optional[torch.FloatTensor] = None,
         reference_latents: Optional[torch.Tensor] = None,
         clip_feature: Optional[torch.FloatTensor] = None,
+        fuse_vae_embedding_in_latents: bool = False,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> WanVideoOutput:
         # TODO: zirui, for debugging
         # print(f"DEBUG:  {self.seperated_timestep=}, {self.config.fuse_vae_embedding_in_latents=}")
-        if self.seperated_timestep and self.config.fuse_vae_embedding_in_latents:
+        # DiffSynth-Studio gates separated timestep on runtime fuse flag.
+        if self.seperated_timestep and fuse_vae_embedding_in_latents:
             # Logic to split timestep for T2V (first frame t=0) to match DiffSynth/WanVideo
             # if torch.rand(1).item() < 0.001: 
             #      logger.info("DEBUG: Using separated_timestep logic (first frame t=0)")
@@ -467,18 +606,17 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             return custom_forward
 
         for block_id, block in enumerate(self.dit.blocks):
-            # if self.training and self.gradient_checkpointing:
-            #      x = torch.utils.checkpoint.checkpoint(
-            #         create_custom_forward(block),
-            #         x,
-            #         context,
-            #         t_mod,
-            #         freqs,
-            #         use_reentrant=False,
-            #     )
-            # else:
-            #     x = block(x, context, t_mod, freqs)
-            x = block(x, context, t_mod, freqs)
+            if self.training and self.is_gradient_checkpointing:
+                 x = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(block),
+                    x,
+                    context,
+                    t_mod,
+                    freqs,
+                    use_reentrant=False,
+                )
+            else:
+                x = block(x, context, t_mod, freqs)
 
         x = self.dit.head(x, t)
         # Remove reference latents
@@ -493,8 +631,6 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             noise_pred=x,
             text_embeddings=context,
         )
-
-
 
     @classmethod
     def load_dit(cls, pretrained_path, device="cpu", dtype=None, **kwargs):
@@ -540,7 +676,7 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
             config_dict = json.load(f)
             
         # 2. Convert config
-        wan_config_kwargs = {}
+        wan_config_kwargs = config_dict.copy()
         
         # Direct mapping attempt
         key_map = {
@@ -569,15 +705,15 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
         config = WanVideoConfig(**wan_config_kwargs)
         
         # 3. Initialize Model
-        logger.info(f"Initializing WanVideoForConditionalGeneration with config: {config}")
+        # logger.info(f"Initializing WanVideoForConditionalGeneration with config: {config}")
         model = cls(config)
         
         # 4. Load Weights (Supports sharded)
         state_dict = {}
         for ckpt_path in weight_files:
-            logger.info(f"Loading weights from {ckpt_path}")
+            # logger.info(f"Loading weights from {ckpt_path}")
             if ckpt_path.endswith(".safetensors"):
-                logger.info(f"DEBUG: Loading safetensors from {ckpt_path}")
+                # logger.info(f"DEBUG: Loading safetensors from {ckpt_path}")
                 part_state_dict = load_file(ckpt_path)
             else:
                 part_state_dict = torch.load(ckpt_path, map_location="cpu")
@@ -606,8 +742,11 @@ class WanVideoForConditionalGeneration(WanVideoPreTrainedModel):
              
         return model
 
+    @classmethod
+    def from_pretrained(cls, pretrained_path, **kwargs):
+        return cls.load_dit(pretrained_path, **kwargs)
+
 
 __all__ = [
     "WanVideoForConditionalGeneration",
-    "WanVideoPreTrainedModel",
 ]

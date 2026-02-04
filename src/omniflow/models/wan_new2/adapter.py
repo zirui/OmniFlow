@@ -1,0 +1,121 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
+import torch
+import torch.nn as nn
+
+from omniflow.models.interface import GenAIModel
+
+from .components import WanComponents
+from .train_pipeline import WanFlowMatchTrainPipeline
+
+
+@dataclass
+class WanNew2ConfigShim:
+    """
+    A tiny config shim to keep trainer saving behavior happy.
+    We intentionally do not implement a full HF/Diffusers config system.
+    """
+
+    raw: dict
+
+    def save_pretrained(self, save_directory: str):
+        # Best-effort: keep minimal JSON for debugging/reproducibility.
+        import json
+        import os
+
+        os.makedirs(save_directory, exist_ok=True)
+        path = os.path.join(save_directory, "wan_new2_config.json")
+        with open(path, "w") as f:
+            json.dump(self.raw, f, indent=2, sort_keys=True)
+
+
+class WanNew2ForTraining(GenAIModel, nn.Module):
+    """
+    A thin adapter that keeps OmniFlow trainers unchanged.
+
+    Trainers call:
+      outputs = model(batch, scheduler)  -> {"loss": ...}
+
+    Internally we delegate workflow to the pipeline.
+    """
+
+    def __init__(
+        self,
+        *,
+        components: WanComponents,
+        train_pipeline: WanFlowMatchTrainPipeline,
+        model_config: Any,
+        raw_config: Optional[dict] = None,
+        trainable_modules: Optional[str] = None,
+    ):
+        super().__init__()
+        self.components = components
+        self.train_pipeline = train_pipeline
+        self.model_config = model_config
+        self.trainable_modules = trainable_modules
+
+        # Expose common attribute names expected by trainers/FSDP ignore regex.
+        self.dit = components.dit
+        self.vae = components.vae
+        self.text_encoder = components.text_encoder
+        self.image_encoder = components.image_encoder
+
+        self.config = WanNew2ConfigShim(raw=raw_config or {})
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    @property
+    def dtype(self):
+        return next(self.parameters()).dtype
+
+    def freeze_except(self):
+        """
+        Keep the existing OmniFlow behavior: freeze non-trainable modules.
+        Default: train only DiT.
+        """
+        mode = (self.trainable_modules or getattr(self.model_config, "trainable_modules", None) or "dit").lower()
+
+        def freeze(m: nn.Module):
+            for p in m.parameters():
+                p.requires_grad_(False)
+
+        def unfreeze(m: nn.Module):
+            for p in m.parameters():
+                p.requires_grad_(True)
+
+        # Freeze everything first
+        freeze(self)
+
+        # Unfreeze requested parts
+        if mode in ("dit", "diffusion", "backbone"):
+            unfreeze(self.dit)
+        elif mode in ("all",):
+            unfreeze(self)
+        else:
+            # Conservative default: DiT only
+            unfreeze(self.dit)
+
+    def forward(self, *args, **kwargs):
+        # Match existing trainer call convention: model(batch, scheduler)
+        if len(args) >= 1 and isinstance(args[0], dict):
+            scheduler = args[1] if len(args) > 1 else kwargs.get("scheduler", None)
+            return self.forward_train(args[0], scheduler=scheduler)
+        raise TypeError("WanNew2ForTraining.forward expects (batch_dict, scheduler)")
+
+    def forward_train(self, batch: Dict[str, Any], scheduler: Any = None) -> Dict[str, torch.Tensor]:
+        if scheduler is None:
+            raise ValueError("scheduler must be provided by trainer")
+        return self.train_pipeline.compute_loss(
+            components=self.components,
+            batch=batch,
+            scheduler=scheduler,
+            model_config=self.model_config,
+        )
+
+    def forward_inference(self, batch: Dict[str, Any], **kwargs):
+        raise NotImplementedError("wan_new2 inference pipeline not wired yet")

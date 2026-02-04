@@ -2,7 +2,6 @@ import collections
 from dataclasses import dataclass
 from typing import Dict, Sequence, Any
 
-import numpy as np
 import torch
 
 
@@ -64,3 +63,19 @@ class VisionCollator:
     @property
     def image_token_id(self):
         return self.processor.tokenizer.convert_tokens_to_ids(self.processor.image_token)
+
+
+@dataclass
+class RawBatchCollator:
+    """
+    A minimal collator that returns raw samples as a list of dicts.
+
+    This is useful when model-specific padding/encoding happens in a separate
+    batch preparation step (e.g. processor.prepare_batch / trainer.prepare_batch),
+    keeping the DataLoader and trainer model-agnostic.
+    """
+
+    def __call__(self, instances: Sequence[Dict]) -> list[Dict]:
+        if isinstance(instances[0], list):
+            instances = [inst for instance in instances for inst in instance]
+        return list(instances)

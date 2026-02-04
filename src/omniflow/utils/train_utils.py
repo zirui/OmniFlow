@@ -12,6 +12,33 @@ import random
 import numpy as np
 
 
+def resolve_dtype(config_or_args) -> torch.dtype:
+    """
+    Resolve mixed-precision dtype from either:
+    - a dict-like config (e.g. trainer_args)
+    - an object with attributes (e.g. HF TrainingArguments)
+
+    Priority:
+      bf16 -> fp16 -> fp32
+    """
+    # Dict-like
+    if isinstance(config_or_args, dict):
+        if config_or_args.get("bf16", False):
+            return torch.bfloat16
+        if config_or_args.get("fp16", False):
+            return torch.float16
+        return torch.float32
+
+    # Attribute-like (HF TrainingArguments etc.)
+    bf16 = bool(getattr(config_or_args, "bf16", False))
+    fp16 = bool(getattr(config_or_args, "fp16", False))
+    if bf16:
+        return torch.bfloat16
+    if fp16:
+        return torch.float16
+    return torch.float32
+
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)

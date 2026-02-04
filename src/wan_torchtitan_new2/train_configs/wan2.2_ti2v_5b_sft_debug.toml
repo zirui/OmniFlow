@@ -1,0 +1,66 @@
+[job]
+description = "Wan2.2 5b TI2V Training (TorchTitan)"
+dump_folder = "./outputs/wan_new2_wan2.2_ti2v_5b_align_debug"
+# When copied into torchtitan/experiments/wan_new2/, use:
+#   torchtitan.experiments.wan_new2.job_config
+# For running from OmniFlow/src directly, you can override via CLI:
+#   --job.custom_config_module=wan_torchtitan_new2.job_config
+custom_config_module = "torchtitan.experiments.wan_new2.job_config"
+
+[model]
+name = "wan_new2"
+flavor = "wan2.2_t2v_5b"
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = true
+
+[training]
+local_batch_size = 1
+max_norm = 1.0
+mixed_precision_param = "bfloat16"
+steps = 10
+enable_cpu_offload = false
+
+dataset = "UltraVideo"
+load_from_pretrained_path = "/zirui/models/Wan2.2-TI2V-5B"
+
+[wan]
+model_type = "ti2v"
+
+[encoder]
+t5_checkpoint_path = "/zirui/models/Wan2.1-T2V-14B/models_t5_umt5-xxl-enc-bf16.pth"
+vae_checkpoint_path = "/zirui/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
+vae_type = "wan2.2"
+
+[optimizer]
+name = "AdamW"
+lr = 1e-5
+eps = 1e-8
+beta1 = 0.9
+beta2 = 0.999
+weight_decay = 0.01
+
+[lr_scheduler]
+decay_type = "constant"
+warmup_steps = 0
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+tensor_parallel_degree = 1
+pipeline_parallel_degree = 1
+
+[activation_checkpoint]
+mode = "full"
+
+[checkpoint]
+enable = false
+interval = 100
+export_dtype = "float32"
+
+[validation]
+enable = false

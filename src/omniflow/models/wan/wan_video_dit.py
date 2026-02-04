@@ -5,26 +5,30 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange 
-from transformers import PreTrainedModel
-from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.utils import logging
+from torch.utils.checkpoint import checkpoint
 
 from .configuration_wanvideo import WanVideoConfig
 
-logger = logging.get_logger(__name__)
+from loguru import logger
 
 # Try to import flash attention
 try:
     from flash_attn import flash_attn_func
 
     FLASH_ATTN_2_AVAILABLE = True
+    # FLASH_ATTN_2_AVAILABLE = False
 except ImportError:
     FLASH_ATTN_2_AVAILABLE = False
     logger.warning("Flash Attention not available, using standard attention")
 
 
 def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int):
-    if FLASH_ATTN_2_AVAILABLE:
+    use_flash_attn = (
+        FLASH_ATTN_2_AVAILABLE
+        and q.dtype in (torch.float16, torch.bfloat16)
+        and q.dtype == k.dtype == v.dtype
+    )
+    if use_flash_attn:
         q = rearrange(q, "b s (n d) -> b s n d", n=num_heads)
         k = rearrange(k, "b s (n d) -> b s n d", n=num_heads)
         v = rearrange(v, "b s (n d) -> b s n d", n=num_heads)
@@ -181,7 +185,7 @@ class GateModule(nn.Module):
         return x + gate * residual
 
 
-class DiTBlock(GradientCheckpointingLayer):
+class DiTBlock(nn.Module):
     def __init__(
         self,
         has_image_input: bool,
@@ -279,22 +283,10 @@ class Head(nn.Module):
         return x
 
 
-class WanDitModel(PreTrainedModel):
-    config: WanVideoConfig
-    base_model_prefix = "dit"
-    supports_gradient_checkpointing = True
-    _no_split_modules = ["DiTBlock"]
-    _supports_flash_attn = True
-    _supports_sdpa = True
-    _can_compile_fullgraph = True
-    _supports_attention_backend = True
-    _can_record_outputs = {
-        "hidden_states": DiTBlock,
-        "attentions": SelfAttention,
-    }
-
+class WanDitModel(nn.Module):
     def __init__(self, config: WanVideoConfig):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
         self.hidden_size = config.dit_hidden_size
         self.in_channels = config.dit_in_channels
         self.intermediate_size = config.dit_intermediate_size
@@ -424,7 +416,7 @@ class WanDitModel(PreTrainedModel):
             if self.training and use_gradient_checkpointing:
                 if use_gradient_checkpointing_offload:
                     with torch.autograd.graph.save_on_cpu():
-                        x = torch.utils.checkpoint.checkpoint(
+                        x = checkpoint(
                             create_custom_forward(block),
                             x,
                             context,
@@ -433,7 +425,7 @@ class WanDitModel(PreTrainedModel):
                             use_reentrant=False,
                         )
                 else:
-                    x = torch.utils.checkpoint.checkpoint(
+                    x = checkpoint(
                         create_custom_forward(block),
                         x,
                         context,
@@ -447,3 +439,11 @@ class WanDitModel(PreTrainedModel):
         x = self.head(x, t)
         x = self.unpatchify(x, (f, h, w))
         return x
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    @property
+    def dtype(self):
+        return next(self.parameters()).dtype

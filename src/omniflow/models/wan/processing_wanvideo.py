@@ -1,5 +1,5 @@
 import warnings
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Tuple
 
 import os
 import numpy as np
@@ -34,25 +34,31 @@ class WanVideoImageProcessor(BaseImageProcessor):
     def __init__(
         self,
         do_resize: bool = True,
-        size: Dict[str, int] = None,
+        size: Optional[Dict[str, int]] = None,
         do_center_crop: bool = True,
-        crop_size: Dict[str, int] = None,
+        crop_size: Optional[Dict[str, int]] = None,
         do_normalize: bool = True,
         image_mean: Optional[Union[float, List[float]]] = None,
         image_std: Optional[Union[float, List[float]]] = None,
         do_convert_rgb: bool = True,
+        max_pixels: Optional[int] = None,
+        height_division_factor: int = 16,
+        width_division_factor: int = 16,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
         self.do_resize = do_resize
-        self.size = size or {"height": 480, "width": 832}
+        self.size = size
         self.do_center_crop = do_center_crop
-        self.crop_size = crop_size or {"height": 480, "width": 832}
+        self.crop_size = crop_size
         self.do_normalize = do_normalize
         self.image_mean = image_mean or [0.5, 0.5, 0.5]
         self.image_std = image_std or [0.5, 0.5, 0.5]
         self.do_convert_rgb = do_convert_rgb
+        self.max_pixels = max_pixels
+        self.height_division_factor = height_division_factor
+        self.width_division_factor = width_division_factor
 
     def resize(
         self,
@@ -84,6 +90,55 @@ class WanVideoImageProcessor(BaseImageProcessor):
         else:
             image = image.resize((size["width"], size["height"]), PILImage.LANCZOS)
         return np.array(image)
+
+    def _extract_hw(self, image: Union[np.ndarray, Image.Image]) -> Tuple[int, int]:
+        if isinstance(image, Image.Image):
+            width, height = image.size
+            return height, width
+        if isinstance(image, np.ndarray):
+            if image.ndim == 3:
+                return image.shape[0], image.shape[1]
+            if image.ndim == 2:
+                return image.shape[0], image.shape[1]
+        raise ValueError("Unsupported image type for size extraction.")
+
+    def _dynamic_target_size(self, image: Union[np.ndarray, Image.Image]) -> Dict[str, int]:
+        height, width = self._extract_hw(image)
+        if self.max_pixels is not None and width * height > self.max_pixels:
+            scale = (width * height / self.max_pixels) ** 0.5
+            height = int(height / scale)
+            width = int(width / scale)
+        height = height // self.height_division_factor * self.height_division_factor
+        width = width // self.width_division_factor * self.width_division_factor
+        height = max(self.height_division_factor, height)
+        width = max(self.width_division_factor, width)
+        return {"height": height, "width": width}
+
+    def _resolve_sizes(self, image: Union[np.ndarray, Image.Image]) -> Tuple[Dict[str, int], Dict[str, int]]:
+        size = self.size
+        crop_size = self.crop_size
+        if size is None and crop_size is None:
+            size = self._dynamic_target_size(image)
+            crop_size = dict(size)
+        elif size is None:
+            size = dict(crop_size)
+        elif crop_size is None:
+            crop_size = dict(size)
+        size = {
+            "height": self._ceil_to_factor(size["height"], self.height_division_factor),
+            "width": self._ceil_to_factor(size["width"], self.width_division_factor),
+        }
+        crop_size = {
+            "height": self._ceil_to_factor(crop_size["height"], self.height_division_factor),
+            "width": self._ceil_to_factor(crop_size["width"], self.width_division_factor),
+        }
+        return size, crop_size
+
+    @staticmethod
+    def _ceil_to_factor(value: int, factor: int) -> int:
+        if value % factor == 0:
+            return value
+        return (value + factor - 1) // factor * factor
 
     def center_crop(
         self,
@@ -174,13 +229,11 @@ class WanVideoImageProcessor(BaseImageProcessor):
                         elif frame.shape[-1] == 4:  # RGBA
                             frame = frame[..., :3]
 
-                    # Resize
+                    size_, crop_size_ = self._resolve_sizes(frame)
                     if do_resize:
-                        frame = self.resize(frame, size)
-
-                    # Center crop
+                        frame = self.resize(frame, size_)
                     if do_center_crop:
-                        frame = self.center_crop(frame, crop_size)
+                        frame = self.center_crop(frame, crop_size_)
 
                     # Normalize
                     if do_normalize:
@@ -199,13 +252,11 @@ class WanVideoImageProcessor(BaseImageProcessor):
                     elif image.shape[-1] == 4:  # RGBA
                         image = image[..., :3]
 
-                # Resize
+                size_, crop_size_ = self._resolve_sizes(image)
                 if do_resize:
-                    image = self.resize(image, size)
-
-                # Center crop
+                    image = self.resize(image, size_)
                 if do_center_crop:
-                    image = self.center_crop(image, crop_size)
+                    image = self.center_crop(image, crop_size_)
 
                 # Normalize
                 if do_normalize:
@@ -272,7 +323,7 @@ class WanVideoProcessor:
     tokenizer_class = "AutoTokenizer"
     image_processor_class = "WanVideoImageProcessor"
 
-    def __init__(self, image_processor=None, tokenizer=None, **kwargs):
+    def __init__(self, image_processor=None, tokenizer=None, max_text_length: Optional[int] = None, **kwargs):
         if image_processor is None:
             image_processor = WanVideoImageProcessor(**kwargs)
         if tokenizer is None:
@@ -286,6 +337,7 @@ class WanVideoProcessor:
 
         self.image_processor = image_processor
         self.tokenizer = tokenizer
+        self.max_text_length = max_text_length
 
     def __call__(
         self,
@@ -314,12 +366,15 @@ class WanVideoProcessor:
 
         # Process text
         if text is not None and self.tokenizer is not None:
+            max_length = kwargs.pop("max_length", None)
+            if max_length is None:
+                max_length = self.max_text_length or getattr(self.tokenizer, "model_max_length", 256)
             text_inputs = self.tokenizer(
                 text,
                 return_tensors=return_tensors,
                 padding=True,
                 truncation=True,
-                max_length=256,
+                max_length=max_length,
                 **kwargs,
             )
             data.update(text_inputs)

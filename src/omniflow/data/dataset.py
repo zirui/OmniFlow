@@ -17,11 +17,18 @@ from torch.utils.data import Dataset
 from omniflow.utils.data_utils import smart_nframes
 from omniflow.utils import fetch_video
 
-from .collator import VisionCollator
+from .collator import RawBatchCollator
+
+def _get_decord_vr(
+    video_path: str,
+    *,
+    num_threads: int,
+) -> VideoReader:
+    """Construct a decord.VideoReader."""
+    return VideoReader(video_path, ctx=cpu(0), num_threads=num_threads)
 
 
 class BaseDataset(Dataset):
-    # def __init__(self, config: DatasetConfig) -> None:
     def __init__(self, config, **kwargs) -> None:
         """
         Initialize the base dataset with configuration.
@@ -30,9 +37,6 @@ class BaseDataset(Dataset):
         """
         super().__init__()
         self.config = config
-        # self.processor_config = config.processor_config
-        # if isinstance(self.processor_config, dict):
-        #     self.processor_config = ProcessorConfig(**self.processor_config)
         self.samples = []
 
     def __len__(self):
@@ -45,7 +49,7 @@ class BaseDataset(Dataset):
         """
         # self._build_from_config()
         # self.processor = self._build_processor()
-        self.processor.build()
+        return
 
     @abstractmethod
     def _build_from_config(self):
@@ -81,6 +85,16 @@ class WanVideoDataset(BaseDataset):
         
         # Load metadata
         self.samples = self._load_metadata()
+        self._sync_processor_video_limits()
+
+    def _sync_processor_video_limits(self):
+        image_processor = None
+        if hasattr(self.processor, "processor") and hasattr(self.processor.processor, "image_processor"):
+            image_processor = self.processor.processor.image_processor
+        if image_processor is None:
+            return
+        if getattr(image_processor, "max_pixels", None) is None and getattr(self.config, "video_max_pixels", None) is not None:
+            image_processor.max_pixels = self.config.video_max_pixels
         
     def _load_metadata(self) -> List[Dict]:
         """Load metadata from JSONL or CSV file."""
@@ -170,10 +184,16 @@ class WanVideoDataset(BaseDataset):
         Returns:
             Tuple of (video frames, sample fps)
         """
-        if isinstance(video_path, str) or isinstance(video_path, BytesIO):
-            vr = VideoReader(video_path, ctx=cpu(0), num_threads=1)
+        # Keep dataset logic simple: use a fixed thread count here.
+        num_threads = 4
+        align = os.getenv("ALIGN_WITH_DIFFSYNTH") == "1"
+
+        if isinstance(video_path, BytesIO):
+            vr = VideoReader(video_path, ctx=cpu(0), num_threads=num_threads)
         elif isinstance(video_path, list):
-            vr = VideoReader(video_path[0], ctx=cpu(0), num_threads=1)
+            vr = _get_decord_vr(video_path[0], num_threads=num_threads)
+        elif isinstance(video_path, str):
+            vr = _get_decord_vr(video_path, num_threads=num_threads)
         else:
             raise ValueError(f"Unsupported video path type: {type(video_path)}")
 
@@ -192,7 +212,7 @@ class WanVideoDataset(BaseDataset):
             else:
                 valid_nframes = 1
                 
-            if os.getenv("ALIGN_WITH_DIFFSYNTH") == "1":
+            if align:
                 # sequential sampling align with diffsynth
                 uniform_sampled_frames = np.arange(valid_nframes, dtype=int)
             else:
@@ -284,30 +304,18 @@ class WanVideoDataset(BaseDataset):
         
         # Get prompt
         prompt = sample.get('prompt', '')
-        
-        # Format as hf_messages (expected by processor)
-        hf_messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "video"},
-                    {"type": "text", "text": prompt}
-                ]
-            }
-        ]
-        
-        # Process with processor
-        processed = self.processor.process(
-            images=None,
-            hf_messages=hf_messages,
-            videos=[video_frames],
-            num_frames=self.config.frame_num
-        )
-        
-        return processed
+        # Return raw sample. 
+        return {
+            "video_frames": video_frames,  # np.ndarray, typically (T, H, W, C)
+            "prompt": prompt,
+            "fps": fps,
+            "num_frames": int(getattr(self.config, "frame_num", 0) or 0),
+            "video_path": str(video_path),
+        }
 
     def get_collator(self):
-        return VisionCollator(self.processor)
+        # Prefer raw collation; model-specific processing should happen in processor.prepare_batch.
+        return RawBatchCollator()
 
 
 def build_dataset(config):
