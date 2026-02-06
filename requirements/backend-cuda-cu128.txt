@@ -1,0 +1,9 @@
+--index-url https://download.pytorch.org/whl/cu128
+
+# CUDA backend (cu128) wheels.
+torch==2.10.0+cu128
+torchvision==0.25.0+cu128
+
+# Optional (CUDA FlashAttention). Install only if you want FA2/FA3.
+# flash-attn
+

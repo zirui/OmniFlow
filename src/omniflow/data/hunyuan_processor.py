@@ -3,7 +3,8 @@ HunyuanVideo data processor (batch preparer).
 """
 
 from __future__ import annotations
-from typing import Any, Dict, Optional, Tuple
+
+from typing import Any
 
 import torch
 
@@ -27,7 +28,7 @@ class HunyuanVideoDataProcessor:
       - (optional) data_type/latents passthrough
     """
 
-    def __init__(self, config: dict, model_id: Optional[str] = None):
+    def __init__(self, config: dict, model_id: str | None = None):
         self.config = config or {}
         self.model_id = model_id
         self.tokenizer = None
@@ -43,9 +44,7 @@ class HunyuanVideoDataProcessor:
 
         self.tokenizer = AutoTokenizer.from_pretrained(tok)
 
-    def _normalize_raw_batch(
-        self, batch: Any
-    ) -> Tuple[list[str], list[Any], Optional[list[Any]], Optional[list[str]]]:
+    def _normalize_raw_batch(self, batch: Any) -> tuple[list[str], list[Any], list[Any] | None, list[str] | None]:
         """
         Normalize dataloader output to:
           - texts: list[str]
@@ -79,7 +78,12 @@ class HunyuanVideoDataProcessor:
             if latents_list is not None and not isinstance(latents_list, (list, tuple)):
                 latents_list = [latents_list]
 
-            return list(map(str, texts)), list(pixel_values_list), list(latents_list) if latents_list is not None else None, list(data_types) if data_types is not None else None
+            return (
+                list(map(str, texts)),
+                list(pixel_values_list),
+                list(latents_list) if latents_list is not None else None,
+                list(data_types) if data_types is not None else None,
+            )
 
         # RawBatchCollator returns list[dict]
         if not isinstance(batch, (list, tuple)) or not batch:
@@ -147,7 +151,7 @@ class HunyuanVideoDataProcessor:
             return pixel.unsqueeze(1).contiguous()  # [C,1,H,W]
         raise ValueError(f"Unsupported pixel ndim={pixel.ndim}, shape={tuple(pixel.shape)}")
 
-    def prepare_batch(self, *, batch: Any, device: torch.device, dtype: torch.dtype) -> Dict[str, Any]:
+    def prepare_batch(self, *, batch: Any, device: torch.device, dtype: torch.dtype) -> dict[str, Any]:
         # v0: only normalize + optional tokenize; keep heavy encoding in model/pipeline.
         if self.tokenizer is None and self.config.get("text_tokenizer"):
             self.build()
@@ -158,10 +162,7 @@ class HunyuanVideoDataProcessor:
         # Allow already-batched [B,C,T,H,W]
         if len(pixels_list) == 1:
             px0 = self._as_torch(pixels_list[0])
-            if px0.ndim == 5:
-                pixel_values = px0
-            else:
-                pixel_values = self._to_bcthw(px0).unsqueeze(0)
+            pixel_values = px0 if px0.ndim == 5 else self._to_bcthw(px0).unsqueeze(0)
         else:
             per_sample = [self._to_bcthw(self._as_torch(p)) for p in pixels_list]
             pixel_values = torch.stack(per_sample, dim=0)
@@ -169,11 +170,19 @@ class HunyuanVideoDataProcessor:
         # Basic dtype normalization (do not move device here; trainers handle that)
         if pixel_values.dtype == torch.uint8:
             pixel_values = pixel_values.to(torch.float32).div(255.0)
+        # Match HunyuanVideo training expectation: pixel_values in [-1, 1]
+        # (official trainer checks this range in `encode_vae`).
+        if pixel_values.is_floating_point():
+            # If it's already in [-1,1], keep it. If it's in [0,1], convert.
+            vmin = float(pixel_values.amin().detach().cpu())
+            vmax = float(pixel_values.amax().detach().cpu())
+            if vmin >= 0.0 and vmax <= 1.0:
+                pixel_values = pixel_values * 2.0 - 1.0
         # honor requested dtype for downstream model
         if dtype is not None and pixel_values.dtype != dtype and pixel_values.is_floating_point():
             pixel_values = pixel_values.to(dtype=dtype)
 
-        out: Dict[str, Any] = {
+        out: dict[str, Any] = {
             "pixel_values": pixel_values,  # [B,C,T,H,W]
             "text": texts,
         }

@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
-from .attention_backend import attention
+from omniflow.attention import attention
 
 __all__ = ["WanModel", "DiTBlock"]
 
@@ -478,4 +478,3 @@ class WanModel(nn.Module):
 
         # init output layer
         nn.init.zeros_(self.head.head.weight)
-

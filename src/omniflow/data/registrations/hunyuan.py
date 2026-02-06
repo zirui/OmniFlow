@@ -1,5 +1,4 @@
-"""Register HunyuanVideo dataset builder.
-"""
+"""Register HunyuanVideo dataset builder."""
 
 from loguru import logger
 
@@ -23,4 +22,3 @@ def build_hunyuan_dataset(dataset_config: dict):
 
     logger.info(f"Built hunyuan dataset with {len(dataset)} samples")
     return dataset, processor
-

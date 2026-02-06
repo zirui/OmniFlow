@@ -1,8 +1,8 @@
 """WanVideo Data Module"""
 
-from .processor import WanVideoDataProcessor
-from .hunyuan_processor import HunyuanVideoDataProcessor
-from .dataset import WanVideoDataset
 from .config import DatasetConfig
+from .dataset import WanVideoDataset
+from .hunyuan_processor import HunyuanVideoDataProcessor
+from .processor import WanVideoDataProcessor
 
-__all__ = ["WanVideoDataProcessor", "HunyuanVideoDataProcessor", "WanVideoDataset", "DatasetConfig"]
+__all__ = ["DatasetConfig", "HunyuanVideoDataProcessor", "WanVideoDataProcessor", "WanVideoDataset"]

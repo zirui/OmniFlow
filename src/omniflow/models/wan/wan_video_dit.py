@@ -9,38 +9,7 @@ from torch.utils.checkpoint import checkpoint
 
 from .configuration_wanvideo import WanVideoConfig
 
-from loguru import logger
-
-# Try to import flash attention
-try:
-    from flash_attn import flash_attn_func
-
-    FLASH_ATTN_2_AVAILABLE = True
-    # FLASH_ATTN_2_AVAILABLE = False
-except ImportError:
-    FLASH_ATTN_2_AVAILABLE = False
-    logger.warning("Flash Attention not available, using standard attention")
-
-
-def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int):
-    use_flash_attn = (
-        FLASH_ATTN_2_AVAILABLE
-        and q.dtype in (torch.float16, torch.bfloat16)
-        and q.dtype == k.dtype == v.dtype
-    )
-    if use_flash_attn:
-        q = rearrange(q, "b s (n d) -> b s n d", n=num_heads)
-        k = rearrange(k, "b s (n d) -> b s n d", n=num_heads)
-        v = rearrange(v, "b s (n d) -> b s n d", n=num_heads)
-        x = flash_attn_func(q, k, v)
-        x = rearrange(x, "b s n d -> b s (n d)", n=num_heads)
-    else:
-        q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
-        k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
-        v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
-        x = F.scaled_dot_product_attention(q, k, v)
-        x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
-    return x
+from omniflow.attention import attention_fused as flash_attention
 
 
 def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor):

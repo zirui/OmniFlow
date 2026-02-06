@@ -1,13 +1,14 @@
 import collections
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Dict, Sequence, Any
+from typing import Any
 
 import torch
 
 
 @dataclass
 class VisionCollator:
-    processor: Any 
+    processor: Any
 
     def pad_sequence(self, input_ids, batch_first, padding_value):
         if self.processor.tokenizer.padding_side == "left":
@@ -17,7 +18,7 @@ class VisionCollator:
             input_ids = torch.flip(input_ids, [1])
         return input_ids
 
-    def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+    def __call__(self, instances: Sequence[dict]) -> dict[str, torch.Tensor]:
         if isinstance(instances[0], list):
             instances = [inst for instance in instances for inst in instance]
         inputs = collections.defaultdict(list)
@@ -26,7 +27,7 @@ class VisionCollator:
                 inputs[key].append(values)
 
         batched_inputs = {}
-        if "input_ids" in inputs.keys():
+        if "input_ids" in inputs:
             input_ids = inputs.pop("input_ids")
             input_ids = self.pad_sequence(
                 input_ids,
@@ -34,7 +35,7 @@ class VisionCollator:
                 padding_value=self.processor.tokenizer.pad_token_id,
             )
             batched_inputs["input_ids"] = input_ids
-        if "labels" in inputs.keys():
+        if "labels" in inputs:
             labels = inputs.pop("labels")
             labels = self.pad_sequence(
                 labels,
@@ -43,7 +44,7 @@ class VisionCollator:
             )
             batched_inputs["labels"] = labels
 
-        if "attention_mask" in inputs.keys():
+        if "attention_mask" in inputs:
             inputs.pop("attention_mask")
 
         attention_mask = input_ids.ne(self.processor.tokenizer.pad_token_id).long()
@@ -75,7 +76,7 @@ class RawBatchCollator:
     keeping the DataLoader and trainer model-agnostic.
     """
 
-    def __call__(self, instances: Sequence[Dict]) -> list[Dict]:
+    def __call__(self, instances: Sequence[dict]) -> list[dict]:
         if isinstance(instances[0], list):
             instances = [inst for instance in instances for inst in instance]
         return list(instances)

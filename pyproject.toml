@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omniflow"
+version = "0.0.0"
+description = "OmniFlow: training for video generation models."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "zirui" }]
+
+dependencies = [
+  "einops",
+  "loguru",
+  "safetensors",
+  "numpy",
+  "pillow",
+  "decord",
+  "imageio",
+  "pydantic",
+  "wandb",
+  "transformers==4.40.0",
+  "peft==0.10.0",
+  # "accelerate",
+  # "deepspeed",
+]
+
+[project.optional-dependencies]
+cuda = []
+rocm = []
+flash-attn-cuda = []
+flash-attn-rocm = []
+dev = ["pytest>=7", "pytest-xdist>=3", "ruff>=0.4"]
+
+[dependency-groups]
+# For `uv run --group dev ...` or `uv sync --group dev`.
+dev = ["pytest>=7", "pytest-xdist>=3", "ruff>=0.4"]
+
+
+[project.scripts]
+train = "train:main"
+
+[tool.setuptools]
+py-modules = ["train"]
+packages = { find = { where = ["src"], include = ["omniflow*"] } }
+package-dir = { "" = ".", "omniflow" = "src/omniflow" }
+
+[tool.ruff]
+line-length = 120
+
+exclude = [".git", ".venv", "venv", "__pycache__", "build", "dist"]
+
+lint.select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "I",   # isort
+  "B",   # flake8-bugbear
+  "UP",  # pyupgrade
+  "C4",  # flake8-comprehensions
+  "SIM", # flake8-simplify
+  "RUF", # Ruff
+]

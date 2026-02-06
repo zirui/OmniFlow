@@ -1,21 +1,21 @@
 """HF trainer implementation and registration."""
 
-from typing import Any, Optional, Union
 import os
+from typing import Any
 
 import torch
 import torch.nn as nn
 from loguru import logger
 from safetensors.torch import save_file as safe_save_file
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import FullStateDictConfig, StateDictType
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from transformers import Trainer as HFTrainer
 from transformers import TrainerCallback, TrainingArguments
 
 from omniflow.optim.adamw_fp32_state import AdamWFP32State
 from omniflow.registry import register_trainer
 from omniflow.schedulers.flow_match import FlowMatchScheduler
-from omniflow.utils.train_utils import get_memory, set_seed, resolve_dtype
+from omniflow.utils.train_utils import get_memory, resolve_dtype, set_seed
 
 
 class WanVideoCallback(TrainerCallback):
@@ -62,7 +62,11 @@ class WanVideoTrainer(HFTrainer):
 
     def create_optimizer(self):
         super().create_optimizer()
-        if getattr(self.args, "bf16", False) and isinstance(self.model, FSDP) and os.getenv("FP32_MASTER_WEIGHTS", "0") == "1":
+        if (
+            getattr(self.args, "bf16", False)
+            and isinstance(self.model, FSDP)
+            and os.getenv("FP32_MASTER_WEIGHTS", "0") == "1"
+        ):
             logger.info("Using fp32-state AdamW to match DeepSpeed bf16 behavior.")
             self.optimizer = AdamWFP32State(
                 self.optimizer.param_groups,
@@ -70,15 +74,17 @@ class WanVideoTrainer(HFTrainer):
                 betas=(float(self.args.adam_beta1), float(self.args.adam_beta2)),
                 eps=float(self.args.adam_epsilon),
             )
-        
-        logger.info(f"Optimizer groups: Decay={len(self.optimizer.param_groups[0]['params'])}, No-Decay={len(self.optimizer.param_groups[1]['params'])}")
+
+        logger.info(
+            f"Optimizer groups: Decay={len(self.optimizer.param_groups[0]['params'])}, No-Decay={len(self.optimizer.param_groups[1]['params'])}"
+        )
         return self.optimizer
 
     def compute_loss(
         self,
         model: nn.Module,
         inputs: Any,
-        num_items_in_batch: Optional[torch.Tensor] = None,
+        num_items_in_batch: torch.Tensor | None = None,
     ):
         # Optional batch preparation hook (model-agnostic).
         # When using a raw collator, HF Trainer will receive `inputs` as a list of
@@ -99,13 +105,13 @@ class WanVideoTrainer(HFTrainer):
                 f"Got: {type(inputs)}. If you use RawBatchCollator, implement processor.prepare_batch()."
             )
         for k, v in inputs.items():
-             if isinstance(v, torch.Tensor):
-                 inputs[k] = v.to(model.device if hasattr(model, "device") else self.args.device)
+            if isinstance(v, torch.Tensor):
+                inputs[k] = v.to(model.device if hasattr(model, "device") else self.args.device)
 
         outputs = model(inputs, self.scheduler)
         return outputs["loss"]
 
-    def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False):
+    def save_model(self, output_dir: str | None = None, _internal_call: bool = False):
         if output_dir is None:
             output_dir = self.args.output_dir
         os.makedirs(output_dir, exist_ok=True)
@@ -127,7 +133,7 @@ class WanVideoTrainer(HFTrainer):
                 FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
             ):
                 full_state = model.state_dict()
-            dit_state_dict = {k[len("dit."):]: v for k, v in full_state.items() if k.startswith("dit.")}
+            dit_state_dict = {k[len("dit.") :]: v for k, v in full_state.items() if k.startswith("dit.")}
         else:
             dit_state_dict = core_model.dit.state_dict()
 
@@ -156,9 +162,9 @@ def build_hf_trainer(*, model, dataset, processor, trainer_args: dict):
         if hasattr(model, "dit") and model.dit is not None:
             model.dit.to(dtype=torch.bfloat16)
         if hasattr(model, "vae") and model.vae is not None:
-             model.vae.to(dtype=torch.bfloat16)
+            model.vae.to(dtype=torch.bfloat16)
         if hasattr(model, "text_encoder") and model.text_encoder is not None:
-             model.text_encoder.to(dtype=torch.bfloat16)
+            model.text_encoder.to(dtype=torch.bfloat16)
         logger.info("FSDP+bf16: casted `dit`, `vae`, and `text_encoder` to bf16")
 
     output_dir = getattr(training_args, "output_dir", None)

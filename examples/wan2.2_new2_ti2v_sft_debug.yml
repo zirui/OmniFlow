@@ -1,134 +1,130 @@
-# trainer_type: wan_trainer
-# Dataset configuration
-dataset_config:
-  dataset_type: vision
-  dataset_format: jsonl
-
-  dataset_path: /zirui/data/UltraVideo/clips_short_1920_brief_example.jsonl
-  data_folder: /zirui/data/UltraVideo/clips_short_1920/clips_short_1920
-
-  video_sampling_strategy: frame_num
-  frame_num: 81
-  shuffle: true
-  video_backend: imageio
-  # video_backend: decord
-  # video_backend: qwen_vl_utils
-
-  # Processor configuration
-  processor_config:
-    processor_name: WanVideo/Wan2.1-T2V-3B
-    processor_type: wanvideo
-    max_text_length: 512
-    text_tokenizer: "/zirui/models/umt5-xxl"
-    extra_kwargs:
-      do_resize: true
-      size:
-        height: 480
-        width: 832
-      do_normalize: true
-      image_mean: [0.5, 0.5, 0.5]
-      image_std: [0.5, 0.5, 0.5]
-      
-model_config:
+model:
   name: wan_new2
-  load_from_pretrained_path: /zirui/models/Wan2.2-TI2V-5B
-
   config:
-    # Valid: t2v / i2v / ti2v / s2v
-    model_type: ti2v
+    load_from_pretrained_path: /zirui/models/Wan2.2-TI2V-5B
+    config:
+      # Valid: t2v / i2v / ti2v / s2v
+      model_type: ti2v
 
-    # DiT model parameters
-    seperated_timestep: false
-    fuse_vae_embedding_in_latents: false
-    trainable_modules: 'dit'
-    vae_type: wan_video_vae_38
+      # DiT model parameters
+      seperated_timestep: false
+      fuse_vae_embedding_in_latents: false
+      trainable_modules: "dit"
+      vae_type: wan_video_vae_38
 
-    # dit_hidden_size: 3072
-    # dit_num_layers: 10
-    # dit_num_heads: 24
-    # dit_intermediate_size: 14336
-    # dit_patch_size: [1, 2, 2]
-    # dit_in_channels: 48
-    # dit_out_channels: 48
-    # dit_freq_dim: 256
-    # dit_text_dim: 4096
-    # dit_eps: 1.0e-6
-    # dit_has_image_input: False
+      # dit_hidden_size: 3072
+      # dit_num_layers: 10
+      # dit_num_heads: 24
+      # dit_intermediate_size: 14336
+      # dit_patch_size: [1, 2, 2]
+      # dit_in_channels: 48
+      # dit_out_channels: 48
+      # dit_freq_dim: 256
+      # dit_text_dim: 4096
+      # dit_eps: 1.0e-6
+      # dit_has_image_input: false
 
-    # dit_has_image_pos_emb: False
-    # dit_has_ref_conv: False
-    # dit_add_control_adapter: False
-    # dit_in_channels_control_adapter: 24
-    # seperated_timestep: True
-    # require_clip_embedding: False
-    # require_vae_embedding: False
-    # fuse_vae_embedding_in_latents: True
-    # trainable_modules: 'dit'
+      # dit_has_image_pos_emb: false
+      # dit_has_ref_conv: false
+      # dit_add_control_adapter: false
+      # dit_in_channels_control_adapter: 24
+      # seperated_timestep: true
+      # require_clip_embedding: false
+      # require_vae_embedding: false
+      # fuse_vae_embedding_in_latents: true
+      # trainable_modules: "dit"
 
-  encoder:
-    # Checkpoint paths
-    t5_encoder: "/zirui/models/Wan2.1-T2V-14B/models_t5_umt5-xxl-enc-bf16.pth"
-    autoencoder: "/zirui/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
-  
-# Training arguments
-trainer_args: &trainer_args
-  output_dir: "/zirui/models/wan2.2_new2_ti2v_debug_out"
-  per_device_train_batch_size: 1
-  per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 1  # Higher for 14B model
-  gradient_checkpointing: true
-  
-  learning_rate: 1.0e-5
-  lr_scheduler_type: "constant"
-  weight_decay: 0.01
-  warmup_steps: 0
+    encoder:
+      t5_encoder: "/zirui/models/Wan2.1-T2V-14B/models_t5_umt5-xxl-enc-bf16.pth"
+      autoencoder: "/zirui/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
 
-  num_train_epochs: 100
-  logging_steps: 1
-  save_steps: 0
-  save_total_limit: 1
-  max_steps: 100
-
-  # dataloader_num_workers: 4
-  dataloader_num_workers: 8
-  dataloader_prefetch_factor: 4
-  dataloader_persistent_workers: true
-
-  # report_to: none
-  report_to: wandb
-  run_name: wan2.2_new2_ti2v-5b-fsdp-perf-c5
-
-  # fp16: false
-  bf16: true
-  # tf32: true
-  
-  seed: 10007
-  remove_unused_columns: false
-  # Optimization
-  optim: "adamw_torch"
-  adam_beta1: 0.9
-  adam_beta2: 0.999
-  adam_epsilon: 1.0e-8
-
-  # sp_ulysses_degree: 1
-  # deepspeed: examples/ds_config/default_config.json
-
-  # FSDP configuration for multi-GPU training
-  fsdp: "full_shard auto_wrap"
-  fsdp_config:
-    backward_prefetch: "backward_pre"
-    forward_prefetch: true
-    use_orig_params: true
-    cpu_ram_efficient_loading: true
-    sync_module_states: true
-    limit_all_gathers: true
-    activation_checkpointing: true
-    gradient_checkpointing: true
-    cpu_offload: false 
-    ignored_modules: ".*(text_encoder|vae).*"
-  # fsdp_transformer_layer_cls_to_wrap: "DiTBlock,WanTextEncoder,WanVideoVAE38"
-  fsdp_transformer_layer_cls_to_wrap: "DiTBlock"
+dataset:
+  name: wan
+  config:
+    dataset_type: vision
+    dataset_format: jsonl
+    dataset_path: /zirui/data/UltraVideo/clips_short_1920_brief_example.jsonl
+    data_folder: /zirui/data/UltraVideo/clips_short_1920/clips_short_1920
+    video_sampling_strategy: frame_num
+    frame_num: 81
+    shuffle: true
+    video_backend: imageio
+    # video_backend: decord
+    # video_backend: qwen_vl_utils
+    processor_config:
+      processor_name: WanVideo/Wan2.1-T2V-3B
+      processor_type: wanvideo
+      max_text_length: 512
+      text_tokenizer: "/zirui/models/umt5-xxl"
+      extra_kwargs:
+        do_resize: true
+        size:
+          height: 480
+          width: 832
+        do_normalize: true
+        image_mean: [0.5, 0.5, 0.5]
+        image_std: [0.5, 0.5, 0.5]
 
 trainer:
   name: fsdp
-  args: *trainer_args
+  args:
+    output_dir: "/zirui/models/wan2.2_new2_ti2v_debug_out"
+    per_device_train_batch_size: 1
+    per_device_eval_batch_size: 1
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: true
+
+    # Attention backend: explicit (no implicit fallback).
+    # Options: auto | sdpa | flash_attn2 | flash_attn3
+    attention_backend: auto
+
+    learning_rate: 1.0e-5
+    lr_scheduler_type: "constant"
+    weight_decay: 0.01
+    warmup_steps: 0
+
+    num_train_epochs: 100
+    logging_steps: 1
+    save_steps: 0
+    save_total_limit: 1
+    max_steps: 100
+
+    # dataloader_num_workers: 4
+    dataloader_num_workers: 8
+    dataloader_prefetch_factor: 4
+    dataloader_persistent_workers: true
+
+    # report_to: none
+    report_to: wandb
+    run_name: wan2.2_new2_ti2v-5b-fsdp-perf-c5
+
+    bf16: true
+    # tf32: true
+
+    seed: 10007
+    remove_unused_columns: false
+
+    # Optimization
+    optim: "adamw_torch"
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+
+    # sp_ulysses_degree: 1
+    # deepspeed: examples/ds_config/default_config.json
+
+    # FSDP configuration for multi-GPU training
+    fsdp: "full_shard auto_wrap"
+    fsdp_config:
+      backward_prefetch: "backward_pre"
+      forward_prefetch: true
+      use_orig_params: true
+      cpu_ram_efficient_loading: true
+      sync_module_states: true
+      limit_all_gathers: true
+      activation_checkpointing: true
+      gradient_checkpointing: true
+      cpu_offload: false
+      ignored_modules: ".*(text_encoder|vae).*"
+    # fsdp_transformer_layer_cls_to_wrap: "DiTBlock,WanTextEncoder,WanVideoVAE38"
+    fsdp_transformer_layer_cls_to_wrap: "DiTBlock"

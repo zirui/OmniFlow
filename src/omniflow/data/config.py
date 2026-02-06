@@ -1,10 +1,10 @@
+from typing import Any, Literal
 
-from typing import List, Literal, Optional, Union, Dict, Any
 from pydantic import BaseModel, field_validator
 
 
 class Args(BaseModel):
-    extra_kwargs: Dict[str, Any] = {}
+    extra_kwargs: dict[str, Any] = {}
 
     def to_dict(self):
         return self.model_dump()
@@ -22,35 +22,35 @@ class DatasetConfig(Args):
     dataset_type: str
     data_folder: str
     dataset_format: Literal["json", "jsonl", "csv", "yaml", "hf_dataset", "arrow"]
-    processor_config: Union[dict, ProcessorConfig]
+    processor_config: dict | ProcessorConfig
 
     # Dataset configuration
-    dataset_path: Optional[str] = None  # Optional - used for external files
-    datasets: Optional[List[dict]] = None  # Optional - used for inline YAML definitions
+    dataset_path: str | None = None  # Optional - used for external files
+    datasets: list[dict] | None = None  # Optional - used for inline YAML definitions
     shuffle: bool = True
-    data_seed: Optional[int] = 42
-    eval_dataset_path: Optional[str] = None
+    data_seed: int | None = 42
+    eval_dataset_path: str | None = None
 
     # Object storage configuration
-    object_storage: Optional[Literal["azure", "gcs", "none"]] = "none"
-    bucket_name: Optional[str] = None
+    object_storage: Literal["azure", "gcs", "none"] | None = "none"
+    bucket_name: str | None = None
 
     # Packing configuration
-    packing: Optional[bool] = False
-    packing_strategy: Optional[str] = None
-    packing_length: Optional[int] = 32000
-    filter_overlong: Optional[bool] = True
-    filter_overlong_workers: Optional[int] = 8
-    max_length: Optional[int] = None
+    packing: bool | None = False
+    packing_strategy: str | None = None
+    packing_length: int | None = 32000
+    filter_overlong: bool | None = True
+    filter_overlong_workers: int | None = 8
+    max_length: int | None = None
 
     # Video configuration
-    video_sampling_strategy: Optional[Literal["fps", "frame_num"]] = "fps"
-    video_max_pixels: Optional[int] = 768 * 28 * 28
-    video_max_frames: Optional[int] = 768
-    video_min_pixels: Optional[int] = 3136
-    frame_num: Optional[int] = 64
-    fps: Optional[int] = 1
-    video_backend: Optional[Literal["decord", "qwen_vl_utils", "qwen_omni_utils", "imageio"]] = "qwen_vl_utils"
+    video_sampling_strategy: Literal["fps", "frame_num"] | None = "fps"
+    video_max_pixels: int | None = 768 * 28 * 28
+    video_max_frames: int | None = 768
+    video_min_pixels: int | None = 3136
+    frame_num: int | None = 64
+    fps: int | None = 1
+    video_backend: Literal["decord", "qwen_vl_utils", "qwen_omni_utils", "imageio"] | None = "qwen_vl_utils"
 
     @field_validator(
         "video_max_pixels",
