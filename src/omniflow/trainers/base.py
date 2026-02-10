@@ -144,6 +144,8 @@ class BaseNativeTrainer:
         self._setup_wandb()
 
         # --- Parallelism (subclass hook) ---
+        # Subclass sets self.sp_group (Ulysses SP group) if SP is enabled.
+        self.sp_group = None
         self._apply_parallelism()
 
         # --- DataLoader ---
@@ -151,10 +153,20 @@ class BaseNativeTrainer:
         self.processing_class = processing_class
         self.data_collator = data_collator
 
+        # When SP is enabled, all ranks in the same SP group process the same sample.
+        # DistributedSampler should use DP-only rank/size so SP peers get identical data.
+        dp_world_size = world_size
+        dp_rank = rank
+        if self.sp_group is not None:
+            import torch.distributed as dist
+            sp_size = dist.get_world_size(self.sp_group)
+            dp_world_size = world_size // sp_size
+            dp_rank = rank // sp_size
+
         self.sampler = torch.utils.data.distributed.DistributedSampler(
             train_dataset,
-            num_replicas=world_size,
-            rank=rank,
+            num_replicas=dp_world_size,
+            rank=dp_rank,
             shuffle=self.args.get("shuffle", True),
         )
 
@@ -301,6 +313,10 @@ class BaseNativeTrainer:
         for k, v in batch.items():
             if isinstance(v, torch.Tensor):
                 batch[k] = v.to(self.device, non_blocking=True)
+
+        # Pass SP group so model can shard sequences across SP ranks
+        if self.sp_group is not None:
+            batch["sp_group"] = self.sp_group
 
         # Use explicit training entry point if available (GenAIModel interface)
         forward_train = getattr(self.model, "forward_train", None)

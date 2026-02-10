@@ -230,7 +230,8 @@ class WanFlowMatchTrainPipeline:
             enabled=bool(separated and fuse_flag),
         )
 
-        noise_pred_list = components.dit(x=x_list, t=t, context=context_list, seq_len=max_seq_len, y=None)
+        sp_group = batch.get("sp_group", None)
+        noise_pred_list = components.dit(x=x_list, t=t, context=context_list, seq_len=max_seq_len, y=None, sp_group=sp_group)
         noise_pred = torch.stack(noise_pred_list)
 
         # 6) Loss

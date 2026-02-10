@@ -76,6 +76,21 @@ class WanNew2ForTraining(GenAIModel, nn.Module):
     def dtype(self):
         return next(self.parameters()).dtype
 
+    def to(self, *args, **kwargs):
+        """
+        Override to propagate .to() to non-nn.Module components.
+
+        Wan VAE wrappers (Wan2_1_VAE, Wan2_2_VAE) are plain Python classes
+        with a custom .to() method, not nn.Module subclasses.  PyTorch's
+        nn.Module.to() only recurses into registered submodules, so the VAE
+        would be silently skipped — causing device mismatches on multi-GPU.
+        """
+        result = super().to(*args, **kwargs)
+        for component in (self.vae, self.image_encoder):
+            if component is not None and not isinstance(component, nn.Module) and hasattr(component, "to"):
+                component.to(*args, **kwargs)
+        return result
+
     def freeze_except(self):
         """
         Keep the existing OmniFlow behavior: freeze non-trainable modules.

@@ -21,7 +21,7 @@ dependencies = [
   "imageio",
   "pydantic",
   "wandb",
-  "transformers==4.40.0",
+  "transformers==4.50.0",
   "peft==0.10.0",
   # "accelerate",
   # "deepspeed",
@@ -36,7 +36,7 @@ dev = ["pytest>=7", "pytest-xdist>=3", "ruff>=0.4"]
 
 [dependency-groups]
 # For `uv run --group dev ...` or `uv sync --group dev`.
-dev = ["pytest>=7", "pytest-xdist>=3", "ruff>=0.4"]
+dev = [{ include-group = "dev" }]
 
 
 [project.scripts]

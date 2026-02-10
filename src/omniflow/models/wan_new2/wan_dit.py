@@ -9,13 +9,21 @@
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
 from omniflow.attention import attention
+from omniflow.distributed.ulysses import (
+    distributed_attention,
+    sp_gather,
+    sp_split,
+    sp_unpad,
+)
 
 __all__ = ["WanModel", "DiTBlock"]
 
@@ -44,8 +52,20 @@ def rope_params(max_seq_len, dim, theta=10000):
 
 
 @torch.amp.autocast("cuda", enabled=False)
-def rope_apply(x, grid_sizes, freqs):
+def rope_apply(x, grid_sizes, freqs, sp_group=None):
+    """
+    Apply 3-D RoPE.  When *sp_group* is given the input is assumed to hold
+    only this rank's local token chunk (S/P) and the correct positional
+    frequencies are selected automatically (following Wan2.2 official).
+    """
     n, c = x.size(2), x.size(3) // 2
+    s = x.size(1)  # local token count (= full seq when no SP)
+
+    if sp_group is not None:
+        sp_size = dist.get_world_size(sp_group)
+        sp_rank = dist.get_rank(sp_group)
+    else:
+        sp_size, sp_rank = 1, 0
 
     # split freqs
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
@@ -55,8 +75,11 @@ def rope_apply(x, grid_sizes, freqs):
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
         seq_len = f * h * w
 
+        # tokens to process: local chunk when SP, valid tokens when single-GPU
+        t = s if sp_size > 1 else seq_len
+
         # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(seq_len, n, -1, 2))
+        x_i = torch.view_as_complex(x[i, :t].to(torch.float64).reshape(t, n, -1, 2))
         freqs_i = torch.cat(
             [
                 freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
@@ -66,16 +89,23 @@ def rope_apply(x, grid_sizes, freqs):
             dim=-1,
         ).reshape(seq_len, 1, -1)
 
+        # SP: pad freqs to padded-full-length, select this rank's range
+        if sp_size > 1:
+            full_len = s * sp_size
+            if seq_len < full_len:
+                freqs_i = torch.cat([
+                    freqs_i,
+                    torch.ones(full_len - seq_len, 1, freqs_i.size(-1),
+                               dtype=freqs_i.dtype, device=freqs_i.device),
+                ], dim=0)
+            freqs_i = freqs_i[sp_rank * s : (sp_rank + 1) * s]
+
         # apply rotary embedding
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
+        x_i = torch.cat([x_i, x[i, t:]])
 
         # append to collection
         output.append(x_i)
-    # IMPORTANT:
-    # Returning float32 here creates an extra full-size copy of q/k (and thus
-    # doubles memory) on long sequences, which can OOM even when the same token
-    # setting works in `wan_new`. Keep dtype consistent with input activations.
     return torch.stack(output).to(x.dtype)
 
 
@@ -133,39 +163,32 @@ class WanSelfAttention(nn.Module):
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-    def forward(self, x, seq_lens, grid_sizes, freqs):
+    def forward(self, x, seq_lens, grid_sizes, freqs, sp_group: Optional[dist.ProcessGroup] = None):
         r"""
         Args:
-            x(Tensor): Shape [B, L, C]
-            seq_lens(Tensor): Shape [B]
-            grid_sizes(Tensor): Shape [B, 3], (F, H, W)
+            x(Tensor): Shape [B, L, C] (L = S/P when SP enabled)
+            seq_lens(Tensor): Shape [B] — valid lengths in the *full* sequence
+            grid_sizes(Tensor): Shape [B, 3], (F, H, W) — full spatial grid
             freqs(Tensor): Rope freqs
+            sp_group: Ulysses SP process group (None = no SP)
         """
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
 
-        def qkv_fn(x_):
-            # FSDP/bf16 training can keep module weights in bf16 while upstream
-            # code uses some float32 math (e.g., rope_apply -> float32). PyTorch
-            # Linear requires input/weight dtypes to match, so we explicitly cast.
-            x_ = x_.to(dtype=self.q.weight.dtype)
-            q = self.norm_q(self.q(x_)).view(b, s, n, d)
-            k = self.norm_k(self.k(x_)).view(b, s, n, d)
-            v = self.v(x_).view(b, s, n, d)
-            return q, k, v
+        x_ = x.to(dtype=self.q.weight.dtype)
+        q = self.norm_q(self.q(x_)).view(b, s, n, d)
+        k = self.norm_k(self.k(x_)).view(b, s, n, d)
+        v = self.v(x_).view(b, s, n, d)
 
-        q, k, v = qkv_fn(x)
+        # RoPE on local tokens (SP-aware: uses rank-offset freqs when sp_group is set)
+        q = rope_apply(q, grid_sizes, freqs, sp_group=sp_group)
+        k = rope_apply(k, grid_sizes, freqs, sp_group=sp_group)
 
-        x = attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
-            v=v,
-            k_lens=seq_lens,
-            window_size=self.window_size,
-            dtype=self.q.weight.dtype,
-        )
+        attn_kwargs = {"k_lens": seq_lens, "window_size": self.window_size, "dtype": self.q.weight.dtype}
+        if sp_group is not None:
+            x = distributed_attention(q, k, v, group=sp_group, attention_fn=attention, **attn_kwargs)
+        else:
+            x = attention(q=q, k=k, v=v, **attn_kwargs)
 
-        # `rope_apply` returns float32 by design; cast back to module dtype
-        # before output projection to avoid matmul dtype mismatch.
         x = x.to(dtype=self.o.weight.dtype)
         x = x.flatten(2)
         x = self.o(x)
@@ -226,7 +249,8 @@ class WanAttentionBlock(nn.Module):
 
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
-    def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
+    def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens,
+                sp_group: Optional[dist.ProcessGroup] = None):
         # Memory-critical:
         # `e` can be very large ([B, seq_len, 6, dim]). Keeping it in fp32 and
         # doing broadcast add in fp32 easily OOMs for Wan2.1 (more tokens).
@@ -235,15 +259,18 @@ class WanAttentionBlock(nn.Module):
         modulation = self.modulation.to(dtype=x.dtype)
         e = (modulation.unsqueeze(0) + e).chunk(6, dim=2)
 
-        # self-attention
+        # self-attention (Ulysses all-to-all happens inside self_attn)
         y = self.self_attn(
             self.norm1(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2),
             seq_lens,
             grid_sizes,
             freqs,
+            sp_group=sp_group,
         )
         x = x + y * e[2].squeeze(2)
 
+        # cross-attention + FFN (no SP communication needed:
+        # each rank's visual queries attend to full text keys independently)
         def cross_attn_ffn(x_, context_, context_lens_, e_):
             x_ = x_ + self.cross_attn(self.norm3(x_), context_, context_lens_)
             ffn_in = self.norm2(x_) * (1 + e_[4].squeeze(2)) + e_[3].squeeze(2)
@@ -357,7 +384,7 @@ class WanModel(nn.Module):
 
         self.init_weights()
 
-    def forward(self, x, t, context, seq_len, y=None):
+    def forward(self, x, t, context, seq_len, y=None, sp_group: Optional[dist.ProcessGroup] = None):
         if self.model_type == "i2v":
             assert y is not None
 
@@ -390,35 +417,28 @@ class WanModel(nn.Module):
         e = e.to(dtype=x.dtype)
         e0 = e0.to(dtype=x.dtype)
 
-        # context
+        # --- Ulysses SP: split sequence-dim tensors across SP ranks ---
+        original_seq_len = None
+        if sp_group is not None:
+            (x, e, e0), original_seq_len = sp_split([x, e, e0], dim=1, group=sp_group)
+
+        # context (text embeddings — NOT sliced, full text on every SP rank)
         context_lens = None
         context_in = torch.stack([torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context])
         context_in = context_in.to(dtype=self.text_embedding[0].weight.dtype)
         context = self.text_embedding(context_in)
 
-        kwargs = dict(
-            e=e0,
-            seq_lens=seq_lens,
-            grid_sizes=grid_sizes,
-            freqs=self.freqs,
-            context=context,
-            context_lens=context_lens,
-        )
-
-        freqs = kwargs["freqs"]
-        context_lens_ = kwargs["context_lens"]
-        seq_lens_ = kwargs["seq_lens"]
-        grid_sizes_ = kwargs["grid_sizes"]
-        e0_ = kwargs["e"]
-        context_ = kwargs["context"]
+        freqs = self.freqs
+        seq_lens_ = seq_lens
+        grid_sizes_ = grid_sizes
+        e0_ = e0
+        context_ = context
+        context_lens_ = context_lens
 
         for block in self.blocks:
-            # Match `wan_new` behavior: block-level activation checkpointing.
-            # This is critical for long sequences (e.g., Wan2.1 latents), otherwise
-            # activations can exceed GPU memory even when `wan_new` fits.
             if self.training and getattr(self, "gradient_checkpointing", False):
 
-                def create_custom_forward(module):
+                def create_custom_forward(module, _sp_group):
                     def custom_forward(x_in, e_in, ctx_in):
                         return module(
                             x_in,
@@ -428,21 +448,37 @@ class WanModel(nn.Module):
                             freqs=freqs,
                             context=ctx_in,
                             context_lens=context_lens_,
+                            sp_group=_sp_group,
                         )
 
                     return custom_forward
 
                 x = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
+                    create_custom_forward(block, sp_group),
                     x,
                     e0_,
                     context_,
                     use_reentrant=False,
                 )
             else:
-                x = block(x, **kwargs)
+                x = block(
+                    x,
+                    e=e0_,
+                    seq_lens=seq_lens_,
+                    grid_sizes=grid_sizes_,
+                    freqs=freqs,
+                    context=context_,
+                    context_lens=context_lens_,
+                    sp_group=sp_group,
+                )
 
+        # head operates on local tokens (like Wan2.2 official)
         x = self.head(x, e)
+
+        # --- Ulysses SP: gather output back to full sequence ---
+        if sp_group is not None:
+            x = sp_unpad(sp_gather(x, dim=1, group=sp_group), dim=1, original_size=original_seq_len)
+
         x = self.unpatchify(x, grid_sizes)
         # IMPORTANT:
         # Returning fp32 here dramatically increases activation/grad memory and slows

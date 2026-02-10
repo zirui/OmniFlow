@@ -15,13 +15,13 @@ from safetensors.torch import save_file as safe_save_file
 from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 
-from omniflow.registry import register_trainer
-from omniflow.utils.distributed_utils import (
+from omniflow.distributed import (
     create_device_mesh,
     load_checkpoint_dtcp,
     save_checkpoint_dtcp,
     setup_distributed,
 )
+from omniflow.registry import register_trainer
 
 from .base import BaseNativeTrainer
 
@@ -66,8 +66,12 @@ class FSDP2Trainer(BaseNativeTrainer):
     # ------------------------------------------------------------------ #
 
     def _apply_parallelism(self):
-        """Set up FSDP2 composable sharding."""
-        self.mesh = create_device_mesh(self.world_size)
+        """Set up FSDP2 composable sharding, optionally with Ulysses SP."""
+        sp_size = int(self.args.get("sp_size", 1))
+        dp_replicate = int(self.args.get("dp_replicate", 1))
+
+        self.mesh = create_device_mesh(self.world_size, sp_size=sp_size, dp_replicate=dp_replicate)
+        self.sp_group = self.mesh.get_group("ulysses") if (self.mesh is not None and sp_size > 1) else None
         self.model.to(self.device)
 
         # Freeze non-trainable params BEFORE FSDP and optimizer creation
@@ -81,25 +85,41 @@ class FSDP2Trainer(BaseNativeTrainer):
     def _apply_fsdp2(self):
         """Apply torch.distributed._composable.fsdp.fully_shard to the model."""
         mp_dtype = self._resolve_dtype()
-        mp_policy = (
-            MixedPrecisionPolicy(
+
+        # ---- Mixed-precision policy (aligned with DeepSpeed bf16) ----
+        #   1. Pre-cast params to bf16 BEFORE FSDP wrapping  (bf16 storage)
+        #   2. reduce_dtype = bf16  (gradient reduce matches DeepSpeed bf16 all-reduce)
+        #   3. AdamWFP32State maintains fp32 master weights and writes back to bf16
+        if mp_dtype != torch.float32:
+            mp_policy = MixedPrecisionPolicy(
                 param_dtype=mp_dtype,
-                reduce_dtype=torch.float32,
+                reduce_dtype=mp_dtype,  # bf16 reduce (matches DeepSpeed bf16)
             )
-            if mp_dtype != torch.float32
-            else None
-        )
+        else:
+            mp_policy = None
+
+        # When SP is enabled, FSDP2 shards across dp_shard_sp (DP + SP combined).
+        # This reduces per-rank parameter memory.
+        fsdp_mesh = self.mesh
+        if self.mesh is not None and self.sp_group is not None:
+            try:
+                fsdp_mesh = self.mesh["dp_shard_sp"]
+            except KeyError:
+                pass  # fallback to full mesh
 
         wrap_target = str(self.args.get("fsdp2_wrap_target", "") or "").strip()
         wrap_root = self._get_module_by_path(self.model, wrap_target) if wrap_target else self.model
 
+        # Pre-cast to bf16 before FSDP wrapping so parameters are stored in bf16,
+        # matching DiffSynth/DeepSpeed bf16 behavior.
+        if mp_dtype != torch.float32:
+            wrap_root.to(dtype=mp_dtype)
+            if self.rank == 0:
+                logger.info(f"FSDP2: pre-cast '{wrap_target or '<model>'}' to {mp_dtype} (DiffSynth-aligned)")
+
         if self.world_size == 1:
             if self.rank == 0:
                 logger.info("FSDP2: world_size=1; skipping composable FSDP wrapping.")
-            if mp_dtype != torch.float32:
-                wrap_root.to(dtype=mp_dtype)
-                if self.rank == 0:
-                    logger.info(f"FSDP2: cast wrap root '{wrap_target or '<model>'}' to {mp_dtype}")
             return
 
         reshard_after_forward = bool(self.args.get("fsdp2_reshard_after_forward", True))
@@ -134,7 +154,7 @@ class FSDP2Trainer(BaseNativeTrainer):
                 ):
                     fully_shard(
                         module,
-                        mesh=self.mesh,
+                        mesh=fsdp_mesh,
                         reshard_after_forward=reshard_after_forward,
                         mp_policy=mp_policy,
                     )
@@ -145,7 +165,7 @@ class FSDP2Trainer(BaseNativeTrainer):
 
         fully_shard(
             wrap_root,
-            mesh=self.mesh,
+            mesh=fsdp_mesh,
             reshard_after_forward=reshard_after_forward,
             mp_policy=mp_policy,
         )
@@ -230,8 +250,7 @@ class FSDP2Trainer(BaseNativeTrainer):
     def _save_checkpoint(self):
         path = os.path.join(self.output_dir, f"checkpoint-{self.global_step}")
         if self.save_strategy == "dit_only":
-            if self.rank == 0:
-                self._save_dit(os.path.join(path, "dit_model.safetensors"))
+            self._save_dit(os.path.join(path, "dit_model.safetensors"))
         else:
             self._save_dtcp(path)
 
@@ -290,44 +309,62 @@ class FSDP2Trainer(BaseNativeTrainer):
         Save `dit` weights as a single safetensors file.
 
         Notes:
-        - On composable FSDP (world_size>1), this materializes a full state dict
-          during collection. Only rank0 writes.
+        - On composable FSDP (world_size>1), ``get_model_state_dict`` with
+          ``full_state_dict=True`` returns the full dict **only on rank 0**;
+          other ranks receive an empty dict.  This is expected – do NOT
+          early-return on the empty-dict check, or non-rank-0 processes will
+          race ahead and desynchronize from rank 0 (which still needs to
+          write to disk).
+        - A ``dist.barrier()`` at the end keeps all ranks in lockstep so
+          that back-to-back saves (e.g. periodic checkpoint + final save)
+          never overlap.
         """
+        import torch.distributed as dist
+
         core_model = self.model
         if not hasattr(core_model, "dit"):
             logger.warning("save_model: model has no `dit` attribute; skipping save.")
             return
 
         if self.world_size > 1:
+            # FSDP-wrapped: use get_model_state_dict to unshard DTensors
             full_state = get_model_state_dict(
                 core_model,
                 options=StateDictOptions(full_state_dict=True, cpu_offload=True),
             )
             dit_state_dict = {k[len("dit.") :]: v for k, v in full_state.items() if k.startswith("dit.")}
         else:
+            # Single GPU (no FSDP wrapping): direct state_dict
             dit_state_dict = core_model.dit.state_dict()
+            if not dit_state_dict:
+                logger.warning("save_model: DiT state dict is empty; skipping save.")
+                return
 
-        if not dit_state_dict:
-            logger.warning("save_model: DiT state dict is empty; skipping save.")
-            return
-
+        # Only rank 0 has the full dict in multi-GPU; write from rank 0 only.
         if self.rank == 0:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            safe_save_file(dit_state_dict, save_path)
-            logger.info(f"Saved DiT weights to {save_path}")
+            if not dit_state_dict:
+                logger.warning("save_model: DiT state dict is empty on rank 0; skipping save.")
+            else:
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                safe_save_file(dit_state_dict, save_path)
+                logger.info(f"Saved DiT weights to {save_path}")
 
-        if self.rank == 0 and hasattr(core_model, "config"):
-            try:
-                core_model.config.save_pretrained(os.path.dirname(save_path))
-            except Exception as exc:
-                logger.warning(f"save_model: failed to save config: {exc}")
+            if hasattr(core_model, "config"):
+                try:
+                    core_model.config.save_pretrained(os.path.dirname(save_path))
+                except Exception as exc:
+                    logger.warning(f"save_model: failed to save config: {exc}")
+
+        # Barrier: ensure all ranks wait for rank 0 to finish writing before
+        # any rank proceeds to the next operation (e.g. another save or exit).
+        if self.world_size > 1:
+            dist.barrier()
 
     def save_model(self):
         """Save final model using the configured strategy."""
         if self.save_strategy == "dit_only":
-            if self.rank == 0:
-                save_path = os.path.join(self.output_dir, "dit_model.safetensors")
-                self._save_dit(save_path)
+            save_path = os.path.join(self.output_dir, "dit_model.safetensors")
+            self._save_dit(save_path)
             return
 
         path = os.path.join(self.output_dir, "checkpoint-final")

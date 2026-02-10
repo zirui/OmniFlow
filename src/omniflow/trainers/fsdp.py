@@ -34,7 +34,7 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
 from omniflow.registry import register_trainer
-from omniflow.utils.distributed_utils import setup_distributed
+from omniflow.distributed import setup_distributed
 
 from .base import BaseNativeTrainer
 
