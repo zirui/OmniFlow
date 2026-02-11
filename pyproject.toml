@@ -18,7 +18,7 @@ dependencies = [
   "numpy",
   "pillow",
   "decord",
-  "imageio",
+  "imageio[ffmpeg]",
   "pydantic",
   "wandb",
   "transformers==4.50.0",
@@ -32,11 +32,14 @@ cuda = []
 rocm = []
 flash-attn-cuda = []
 flash-attn-rocm = []
-dev = ["pytest>=7", "pytest-xdist>=3", "ruff>=0.4"]
-
-[dependency-groups]
-# For `uv run --group dev ...` or `uv sync --group dev`.
-dev = [{ include-group = "dev" }]
+# dev = ["pytest>=7", "pytest-xdist>=3", "ruff>=0.4"]
+test = ["pytest>=7", "pytest-xdist>=3"]
+lint = ["ruff>=0.4"]
+dev = [
+  "pytest>=7",
+  "pytest-xdist>=3",
+  "ruff>=0.4",
+]
 
 
 [project.scripts]

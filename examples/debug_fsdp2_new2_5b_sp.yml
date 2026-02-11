@@ -1,0 +1,73 @@
+model:
+  name: wan_new2
+  config:
+    load_from_pretrained_path: /zirui/models/Wan2.2-TI2V-5B
+    config:
+      model_type: t2v
+      seperated_timestep: False
+      fuse_vae_embedding_in_latents: False
+      trainable_modules: "dit"
+      vae_type: wan_video_vae_38
+    encoder:
+      t5_encoder: "/zirui/models/Wan2.2-TI2V-5B/models_t5_umt5-xxl-enc-bf16.pth"
+      autoencoder: "/zirui/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
+
+dataset:
+  name: wan
+  config:
+    dataset_type: vision
+    dataset_format: jsonl
+    dataset_path: /zirui/data/UltraVideo/clips_short_1920_brief_example.jsonl
+    # data_folder: /zirui/data/UltraVideo/clips_short_1920/clips_short_1920
+    data_folder: /zirui/data/UltraVideo/clips_short_1920
+    video_sampling_strategy: frame_num
+    frame_num: 81
+    shuffle: true
+    video_backend: imageio
+    processor_config:
+      processor_name: WanVideo/Wan2.1-T2V-3B
+      processor_type: wanvideo
+      max_text_length: 512
+      text_tokenizer: "/zirui/models/umt5-xxl"
+      extra_kwargs:
+        do_resize: true
+        size:
+          height: 480
+          width: 832
+        do_normalize: true
+        image_mean: [0.5, 0.5, 0.5]
+        image_std: [0.5, 0.5, 0.5]
+
+trainer:
+  name: fsdp2
+  args:
+    output_dir: "/zirui/models/debug-fsdp2-5b"
+    per_device_train_batch_size: 1
+    per_device_eval_batch_size: 1
+    gradient_accumulation_steps: 1
+    attention_backend: sdpa
+    # attention_backend: flash_attn2
+    learning_rate: 1.0e-5
+    lr_scheduler_type: "constant"
+    warmup_steps: 0
+    weight_decay: 0.01
+    num_train_epochs: 100
+    logging_steps: 1
+    save_steps: 100
+    max_steps: 1000
+    dataloader_num_workers: 4
+    report_to: wandb
+    run_name: debug-wan-new2-5b-fsdp2-sdpa-sp4-tw325-n2
+    bf16: true
+    seed: 10007
+    optim: "adamw_torch"
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    gradient_checkpointing: true
+    fsdp2_wrap_target: "dit"
+    fsdp_transformer_layer_cls_to_wrap: "DiTBlock"
+
+    sp_size: 4
+    # sp_size: 1
+    dp_replicate: 1
