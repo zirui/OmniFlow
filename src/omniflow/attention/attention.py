@@ -51,7 +51,7 @@ __all__ = [
 _ATTENTION_BACKEND: str = "auto"
 
 
-_VALID_BACKENDS = ("auto", "sdpa", "flash_attn2", "flash_attn3")
+_VALID_BACKENDS = ("auto", "sdpa", "flex_attention", "flash_attn2", "flash_attn3")
 
 
 def set_attention_backend(backend: str) -> None:
@@ -84,7 +84,7 @@ def _resolve_flash_version(device_type: str) -> int | None:
         - 2 or 3: use flash attention, prefer that version (3 may fall back to 2 in `flash_attention`)
     """
     backend = _ATTENTION_BACKEND
-    if backend == "sdpa":
+    if backend in ("sdpa", "flex_attention"):
         return None
 
     if device_type != "cuda":
@@ -303,6 +303,25 @@ def attention(
             deterministic=deterministic,
             dtype=dtype,
             version=version,
+        )
+
+    # FlexAttention path (native PyTorch, requires torch.compile for perf)
+    if _ATTENTION_BACKEND == "flex_attention":
+        from .flex import flex_attention_fn
+
+        return flex_attention_fn(
+            q=q,
+            k=k,
+            v=v,
+            q_lens=q_lens,
+            k_lens=k_lens,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            q_scale=q_scale,
+            causal=causal,
+            window_size=window_size,
+            deterministic=deterministic,
+            dtype=dtype,
         )
 
     # SDPA fallback (also used for CPU).

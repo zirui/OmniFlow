@@ -17,9 +17,11 @@ dataset:
   config:
     dataset_type: vision
     dataset_format: jsonl
-    dataset_path: /zirui/data/UltraVideo/clips_short_1920_brief_example.jsonl
+    # dataset_path: /zirui/data/UltraVideo/clips_short_1920_brief_example.jsonl
     # data_folder: /zirui/data/UltraVideo/clips_short_1920/clips_short_1920
-    data_folder: /zirui/data/UltraVideo/clips_short_1920
+    # data_folder: /zirui/data/UltraVideo/clips_short_1920
+    dataset_path: /zirui/data/tiny-video-samples/meta.jsonl
+    data_folder: /zirui/data/tiny-video-samples/data
     video_sampling_strategy: frame_num
     frame_num: 81
     shuffle: true
@@ -45,19 +47,24 @@ trainer:
     per_device_train_batch_size: 1
     per_device_eval_batch_size: 1
     gradient_accumulation_steps: 1
-    attention_backend: sdpa
+    # attention_backend: sdpa 
     # attention_backend: flash_attn2
+    attention_backend: flex_attention
     learning_rate: 1.0e-5
     lr_scheduler_type: "constant"
     warmup_steps: 0
     weight_decay: 0.01
-    num_train_epochs: 100
+    num_train_epochs: 10
     logging_steps: 1
-    save_steps: 100
-    max_steps: 1000
+    save_steps: 1000
+    max_steps: 100
     dataloader_num_workers: 4
     report_to: wandb
-    run_name: debug-wan-new2-5b-fsdp2-sdpa-sp4-tw325-n2
+    # run_name: debug-wan-new2-5b-fsdp2-sdpa-sp1-g8-mi355
+    # run_name: debug-wan-new2-5b-fsdp2-sdpa-sp8-mi355-n1-slurm
+    # run_name: debug-wan-new2-5b-fsdp2-flexattn
+    # run_name: debug-wan-new2-5b-fsdp2-g1-s1-sdpa
+    run_name: debug-wan-new2-5b-fsdp2-g1-s1-flex
     bf16: true
     seed: 10007
     optim: "adamw_torch"
@@ -68,6 +75,6 @@ trainer:
     fsdp2_wrap_target: "dit"
     fsdp_transformer_layer_cls_to_wrap: "DiTBlock"
 
-    sp_size: 4
-    # sp_size: 1
+    # sp_size: 8
+    sp_size: 1
     dp_replicate: 1
