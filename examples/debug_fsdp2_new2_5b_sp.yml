@@ -59,7 +59,8 @@ trainer:
     save_steps: 1000
     max_steps: 100
     dataloader_num_workers: 4
-    report_to: wandb
+    # report_to: wandb
+    report_to: none
     # run_name: debug-wan-new2-5b-fsdp2-sdpa-sp1-g8-mi355
     # run_name: debug-wan-new2-5b-fsdp2-sdpa-sp8-mi355-n1-slurm
     # run_name: debug-wan-new2-5b-fsdp2-flexattn

@@ -28,8 +28,32 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-cuda = []
-rocm = []
+cuda = [
+    "torch==2.10.0+cu128",
+    "torchvision==0.25.0+cu128",
+]
+rocm = [
+    "torch==2.10.0+rocm7.0",
+    "torchvision==0.25.0+rocm7.0",
+    "triton-rocm==3.6.0",
+]
+rocm7-1 = [
+    "torch==2.10.0+rocm7.1",
+    "torchvision==0.25.0+rocm7.1",
+    "triton-rocm==3.6.0",
+]
+torchtitan = [
+    "torchdata>=0.8.0",
+    "datasets>=3.6.0",
+    "tomli>=1.1.0; python_version < '3.11'",
+    "tensorboard",
+    "tabulate",
+    "wandb",
+    "fsspec",
+    "tyro",
+    "tokenizers>=0.15.0",
+    "safetensors",
+]
 flash-attn-cuda = []
 flash-attn-rocm = []
 # dev = ["pytest>=7", "pytest-xdist>=3", "ruff>=0.4"]
@@ -65,3 +89,45 @@ lint.select = [
   "SIM", # flake8-simplify
   "RUF", # Ruff
 ]
+
+
+[tool.uv.sources]
+torch = [
+  { index = "rocm7-0", marker = "extra == 'rocm'" },
+  { index = "rocm7-1", marker = "extra == 'rocm7-1' and extra != 'rocm'" },
+  { index = "cu128", marker = "extra != 'rocm' and extra != 'rocm7-1'" },
+]
+torchvision = [
+  { index = "rocm7-0", marker = "extra == 'rocm'" },
+  { index = "rocm7-1", marker = "extra == 'rocm7-1' and extra != 'rocm'" },
+  { index = "cu128", marker = "extra != 'rocm' and extra != 'rocm7-1'" },
+]
+triton-rocm = [
+  { index = "rocm7-0", marker = "extra == 'rocm'" },
+  { index = "rocm7-1", marker = "extra == 'rocm7-1' and extra != 'rocm'" },
+]
+
+[[tool.uv.index]]
+name = "rocm7-0"
+url = "https://download.pytorch.org/whl/rocm7.0"
+explicit = true
+
+[[tool.uv.index]]
+name = "rocm7-1"
+url = "https://download.pytorch.org/whl/rocm7.1"
+explicit = true
+
+[[tool.uv.index]]
+name = "cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv]
+conflicts = [
+  [
+    { extra = "rocm" },
+    { extra = "rocm7-1" },
+    { extra = "cuda" },
+  ],
+]
+

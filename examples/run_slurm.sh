@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=omniflow
 #SBATCH --output=logs/omniflow.%j.out
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=96
 #SBATCH --gres=gpu:8
@@ -13,7 +13,7 @@
 # ---- User Config ----
 DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.9_gfx942"}
 CONFIG=${CONFIG:-"examples/debug_fsdp2_new2_5b_sp.yml"}
-GPUS_PER_NODE=8
+GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
 # ---- Distributed Setup ----
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
@@ -34,7 +34,6 @@ docker run --rm \
     --cap-add=SYS_PTRACE --cap-add=CAP_SYS_ADMIN \
     --security-opt seccomp=unconfined --group-add video --privileged \
     -v /etc/libibverbs.d/:/etc/libibverbs.d \
-    -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/:ro \
     -v /mnt/shared/zirui/:/mnt/shared/zirui \
     -v /mnt/shared/zirui/:/zirui \
     -w /zirui/code/OmniFlow \
@@ -52,7 +51,11 @@ docker run --rm \
     -e FP32_MASTER_WEIGHTS='1' \
     -e PYTHONPATH=/zirui/code/OmniFlow/src \
     $DOCKER_IMAGE bash -c '\
-        source /zirui/mm-env/bin/activate && \
+        # install binutils
+        apt-get update -y && \
+        apt-get install -y binutils && \
+        # Activate env
+        source /zirui/mm-env12/bin/activate && \
         torchrun \
             --nnodes=\$NNODES \
             --node_rank=\$NODE_RANK \

@@ -25,11 +25,10 @@ Video ─▶ VAE ─▶ z_t
 ```
 
 
-
 ## TODO:
 1. **Parallism**
   - [ ] CP
-  - [ ] Ulysses
+  - [x] Ulysses
   - [ ] USP
 2. **Models**
    - [ ] hunyuan-video
@@ -39,7 +38,7 @@ Video ─▶ VAE ─▶ z_t
     - [ ] BSA
     - [ ] VSA
 4. **Backend**
-   - [ ] native pytorch trainer
+   - [x] native pytorch trainer
    - [x] torchtitan
 5. **Data**
   - [ ] video streaming input
@@ -54,9 +53,20 @@ Video ─▶ VAE ─▶ z_t
 # Update submodules
 git submodule update --init --recursive
 
-# Install dependencies
-pip install -r requirements.txt
-pip install -r third_party/torchtitan/requirements.txt 
+# Install general dependencies with default (no specific accelerator)
+uv sync
+
+# Install with ROCm 7.0 support
+uv sync --extra rocm
+
+# Install with ROCm 7.1 support
+uv sync --extra rocm7-1
+
+# Install with CUDA support (cu128)
+uv sync --extra cuda
+
+# Install with torchtitan (can be combined with other extras)
+uv sync --extra torchtitan --extra rocm
 ```
 
 2. Download pretrained models(if needed):
