@@ -1,0 +1,10 @@
+--index-url https://download.pytorch.org/whl/rocm7.0
+
+# ROCm backend (rocm7.0) wheels.
+torch==2.10.0+rocm7.0
+torchvision==0.25.0+rocm7.0
+
+# torch==2.10.0+rocm7.0 depends on triton-rocm==3.6.0 on this index.
+triton-rocm==3.6.0
+
+# Optional (ROCm FlashAttention2, e.g. aiter-based).
