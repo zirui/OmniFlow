@@ -155,13 +155,17 @@ class BaseNativeTrainer:
 
         # When SP is enabled, all ranks in the same SP group process the same sample.
         # DistributedSampler should use DP-only rank/size so SP peers get identical data.
+        self.sp_size = 1
         dp_world_size = world_size
         dp_rank = rank
         if self.sp_group is not None:
             import torch.distributed as dist
-            sp_size = dist.get_world_size(self.sp_group)
-            dp_world_size = world_size // sp_size
-            dp_rank = rank // sp_size
+            self.sp_size = dist.get_world_size(self.sp_group)
+            dp_world_size = world_size // self.sp_size
+            dp_rank = rank // self.sp_size
+
+        self.data_parallel_world_size = dp_world_size
+        self.per_device_train_batch_size = int(self.args.get("per_device_train_batch_size", 1))
 
         self.sampler = torch.utils.data.distributed.DistributedSampler(
             train_dataset,
@@ -173,7 +177,7 @@ class BaseNativeTrainer:
         num_workers = int(self.args.get("dataloader_num_workers", 4) or 0)
         self.dataloader = torch.utils.data.DataLoader(
             train_dataset,
-            batch_size=self.args.get("per_device_train_batch_size", 1),
+            batch_size=self.per_device_train_batch_size,
             sampler=self.sampler,
             num_workers=num_workers,
             collate_fn=data_collator,
@@ -326,6 +330,63 @@ class BaseNativeTrainer:
             outputs = self.model(batch, self.scheduler)
         return outputs["loss"]
 
+    def _infer_batch_size_from_tensors(self, value) -> int | None:
+        if isinstance(value, torch.Tensor):
+            return int(value.shape[0]) if value.ndim > 0 else 1
+        if isinstance(value, dict):
+            for item in value.values():
+                batch_size = self._infer_batch_size_from_tensors(item)
+                if batch_size is not None:
+                    return batch_size
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                batch_size = self._infer_batch_size_from_tensors(item)
+                if batch_size is not None:
+                    return batch_size
+        return None
+
+    def _infer_batch_size_from_sequences(self, value) -> int | None:
+        if isinstance(value, dict):
+            for item in value.values():
+                batch_size = self._infer_batch_size_from_sequences(item)
+                if batch_size is not None:
+                    return batch_size
+            return None
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return 0
+            first = value[0]
+            if isinstance(first, (dict, list, tuple, torch.Tensor)):
+                for item in value:
+                    batch_size = self._infer_batch_size_from_sequences(item)
+                    if batch_size is not None:
+                        return batch_size
+                return None
+            return len(value)
+        return None
+
+    def _infer_local_batch_size(self, batch) -> int:
+        tensor_batch_size = self._infer_batch_size_from_tensors(batch)
+        if tensor_batch_size is not None:
+            return tensor_batch_size
+
+        sequence_batch_size = self._infer_batch_size_from_sequences(batch)
+        if sequence_batch_size is not None:
+            return sequence_batch_size
+
+        return self.per_device_train_batch_size
+
+    def _compute_samples_per_gpu_per_second(
+        self,
+        local_samples: int,
+        interval_seconds: float | None,
+    ) -> float | None:
+        if interval_seconds is None or interval_seconds <= 0 or local_samples <= 0 or self.world_size <= 0:
+            return None
+
+        global_samples = float(local_samples) * float(self.data_parallel_world_size)
+        return global_samples / float(self.world_size) / float(interval_seconds)
+
     def _log_step(
         self,
         loss_value: float,
@@ -333,6 +394,7 @@ class BaseNativeTrainer:
         step_time: float | None = None,
         elapsed: float | None = None,
         eta_seconds: float | None = None,
+        throughput_samples_per_gpu_s: float | None = None,
     ):
         """Log training metrics. Format matches test regex expectations."""
         if self.rank != 0:
@@ -345,6 +407,8 @@ class BaseNativeTrainer:
         msg = f"step={self.global_step} loss={loss_value:.4f} mem={alloc:.2f}/{res:.2f}GB gnorm={grad_norm:.4f}"
         if step_time is not None:
             msg += f" step_time={step_time:.2f}s"
+        if throughput_samples_per_gpu_s is not None:
+            msg += f" throughput={throughput_samples_per_gpu_s:.4f}samples/gpu/s"
         if elapsed is not None:
             msg += f" elapsed={elapsed / 60:.2f}m"
         if eta_seconds is not None:
@@ -363,6 +427,8 @@ class BaseNativeTrainer:
             }
             if step_time is not None:
                 payload["time/step_s"] = step_time
+            if throughput_samples_per_gpu_s is not None:
+                payload["perf/samples_per_gpu_s"] = throughput_samples_per_gpu_s
             if elapsed is not None:
                 payload["time/elapsed_s"] = elapsed
             if eta_seconds is not None:
@@ -384,12 +450,16 @@ class BaseNativeTrainer:
 
         start_time = time.time()
         last_log_time = start_time
+        local_samples_in_update = 0
+        local_samples_since_log = 0
+        update_steps_since_log = 0
 
         for epoch in range(self.num_train_epochs):
             self.sampler.set_epoch(epoch)
 
             for batch_idx, batch in enumerate(self.dataloader):
                 is_update_step = ((batch_idx + 1) % max(1, self.grad_accum_steps)) == 0
+                local_samples_in_update += self._infer_local_batch_size(batch)
 
                 with self._grad_sync_context(is_update_step):
                     loss = self.compute_loss(batch)
@@ -403,23 +473,34 @@ class BaseNativeTrainer:
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
+                    update_steps_since_log += 1
+                    local_samples_since_log += local_samples_in_update
+                    local_samples_in_update = 0
 
                     # Logging
                     if self.global_step % self.logging_steps == 0:
                         loss_val = loss.detach().float().item() * max(1, self.grad_accum_steps)
                         now = time.time()
-                        step_time = now - last_log_time
+                        log_interval = now - last_log_time
+                        step_time = log_interval / max(1, update_steps_since_log)
                         last_log_time = now
                         elapsed = now - start_time
                         steps_left = max(0, self.total_steps - self.global_step)
                         eta_seconds = step_time * steps_left
+                        throughput_samples_per_gpu_s = self._compute_samples_per_gpu_per_second(
+                            local_samples=local_samples_since_log,
+                            interval_seconds=log_interval,
+                        )
                         self._log_step(
                             loss_val,
                             grad_norm=grad_norm,
                             step_time=step_time,
                             elapsed=elapsed,
                             eta_seconds=eta_seconds,
+                            throughput_samples_per_gpu_s=throughput_samples_per_gpu_s,
                         )
+                        local_samples_since_log = 0
+                        update_steps_since_log = 0
 
                     # Periodic save
                     if self.save_steps > 0 and self.global_step % self.save_steps == 0:

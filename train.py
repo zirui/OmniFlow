@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(f"Missing required config key: {exc}") from exc
 
     # --- Attention backend (must be set before model import/build) ---
-    # Options: auto | sdpa | flash_attn2 | flash_attn3
+    # Options: auto | sdpa | flex_attention | flash_attn2 | flash_attn3 | flash_attn_aiter
     # Canonical config location: trainer.args.attention_backend
     attn_backend = trainer_args.get("attention_backend")
     if attn_backend:

@@ -33,10 +33,13 @@ Video ─▶ VAE ─▶ z_t
 2. **Models**
    - [ ] hunyuan-video
 3. **Attention**
-    - [ ] FA2/FA3(aiter-FA-v3)
+    - [x] FA2/FA3(aiter-FA-v3)/FlexAttention
+    - [ ] NABLA
+    - [ ] STA
+    - [ ] VSA
     - [ ] SSA
     - [ ] BSA
-    - [ ] VSA
+    - [ ] SLA
 4. **Backend**
    - [x] native pytorch trainer
    - [x] torchtitan
@@ -54,9 +57,14 @@ Video ─▶ VAE ─▶ z_t
 git submodule update --init --recursive
 
 # Install general dependencies with default (no specific accelerator)
+
+# 1. Install uv project manager (if you don't already have it)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. Install dependencies
 uv sync
 
-# Install with ROCm 7.0 support
+# 3. Install with CUDA/ROCm 7.0 support
 uv sync --extra rocm
 
 # Install with ROCm 7.1 support

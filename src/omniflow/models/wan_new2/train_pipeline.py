@@ -82,6 +82,34 @@ class WanFlowMatchTrainPipeline:
         return torch.stack(latents_list)
 
     @staticmethod
+    def _get_dit_patch_size(model_config: Any) -> tuple[int, int, int]:
+        patch_size = tuple(getattr(model_config, "dit_patch_size", (1, 2, 2)))
+        if len(patch_size) != 3:
+            raise ValueError(f"Expected 3D dit_patch_size, got {patch_size!r}")
+        return patch_size
+
+    @staticmethod
+    def _pad_latents_for_dit(
+        latents: torch.Tensor, *, patch_size: tuple[int, int, int]
+    ) -> tuple[torch.Tensor, tuple[int, int]]:
+        _, _, _, height, width = latents.shape
+        _, patch_h, patch_w = patch_size
+        pad_h = (-height) % patch_h
+        pad_w = (-width) % patch_w
+        if pad_h == 0 and pad_w == 0:
+            return latents, (height, width)
+
+        # Pad only the latent-space bottom/right edges so DiT patchify works on any
+        # VAE output shape. We crop predictions back before computing loss.
+        latents = F.pad(latents, (0, pad_w, 0, pad_h))
+        return latents, (height, width)
+
+    @staticmethod
+    def _crop_latents(latents: torch.Tensor, *, spatial_size: tuple[int, int]) -> torch.Tensor:
+        height, width = spatial_size
+        return latents[..., :height, :width]
+
+    @staticmethod
     def _select_timestep(scheduler: Any, device: torch.device) -> torch.Tensor:
         """
         Match `wan_new` timestep selection:
@@ -162,8 +190,6 @@ class WanFlowMatchTrainPipeline:
           - input_ids: Tensor [B, L]
           - attention_mask: Tensor [B, L]
         """
-        import os
-
         video = batch.get("video")
         if video is None:
             raise ValueError("Batch must contain 'video'")
@@ -194,6 +220,10 @@ class WanFlowMatchTrainPipeline:
 
         with torch.no_grad():
             input_latents = self._vae_encode(components.vae, video).to(device=device, dtype=dtype)
+        patch_size = self._get_dit_patch_size(model_config)
+        input_latents, original_latent_spatial_size = self._pad_latents_for_dit(
+            input_latents, patch_size=patch_size
+        )
 
         # 2) Sample timestep + noise (match `wan_new`: noise on CPU, timestep from scheduler.timesteps)
         timestep = self._select_timestep(scheduler, device=device)  # [1] (float)
@@ -215,7 +245,7 @@ class WanFlowMatchTrainPipeline:
         context_list = [context[i] for i in range(context.shape[0])]
 
         # seq_len computed like wan_new: based on latent shape and patch size
-        d_f, d_h, d_w = getattr(model_config, "dit_patch_size", (1, 2, 2))
+        d_f, d_h, d_w = patch_size
         max_seq_len = 0
         for x in x_list:
             seq_len = x.shape[1] * (x.shape[2] // d_h) * (x.shape[3] // d_w)
@@ -233,6 +263,8 @@ class WanFlowMatchTrainPipeline:
         sp_group = batch.get("sp_group", None)
         noise_pred_list = components.dit(x=x_list, t=t, context=context_list, seq_len=max_seq_len, y=None, sp_group=sp_group)
         noise_pred = torch.stack(noise_pred_list)
+        noise_pred = self._crop_latents(noise_pred, spatial_size=original_latent_spatial_size)
+        target = self._crop_latents(target, spatial_size=original_latent_spatial_size)
 
         # 6) Loss
         loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
