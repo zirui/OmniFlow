@@ -404,7 +404,11 @@ class BaseNativeTrainer:
 
         # NOTE: The "step=... loss=... mem=.../...GB" format is parsed by
         # tests/test_wan_fsdp2_training_baseline.py. Do not change it.
-        msg = f"step={self.global_step} loss={loss_value:.4f} mem={alloc:.2f}/{res:.2f}GB gnorm={grad_norm:.4f}"
+        msg = (
+            f"step={self.global_step} loss={loss_value:.4f} "
+            f"mem={alloc:.2f}/{res:.2f}GB peak_mem={max_mem:.2f}GB "
+            f"gnorm={grad_norm:.4f}"
+        )
         if step_time is not None:
             msg += f" step_time={step_time:.2f}s"
         if throughput_samples_per_gpu_s is not None:
