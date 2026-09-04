@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 from .attention import (
     AITER_FLASH_ATTN_AVAILABLE,
     FLASH_ATTN_2_AVAILABLE,

@@ -1,15 +1,22 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 
 """
 utils for training
 """
 
+import hashlib
 import os
+import random
+from contextlib import contextmanager
+
+import numpy as np
 import torch
 from safetensors import safe_open
-from contextlib import contextmanager
-import hashlib
-import random
-import numpy as np
 
 
 def resolve_dtype(config_or_args) -> torch.dtype:
@@ -51,6 +58,7 @@ def count_parameters(model):
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total, trainable
 
+
 def get_memory(unit=1e9):
     torch.cuda.synchronize()
     allocated = torch.cuda.memory_allocated()
@@ -58,25 +66,14 @@ def get_memory(unit=1e9):
     max_alloc = torch.cuda.max_memory_allocated()
     return allocated / unit, reserved / unit, max_alloc / unit
 
-def print_cuda_memory(prefix="", unit=1e9):
-    allocated = torch.cuda.memory_allocated() / unit
-    reserved = torch.cuda.memory_reserved() / unit
-    max_alloc = torch.cuda.max_memory_allocated() / unit
-    print(
-        f"{prefix} "
-        f"allocated={allocated:.2f}GB, "
-        f"reserved={reserved:.2f}GB, "
-        f"max_alloc={max_alloc:.2f}GB"
-    )
-
 
 @contextmanager
-def init_weights_on_device(device = torch.device("meta"), include_buffers :bool = False):
-    
+def init_weights_on_device(device=torch.device("meta"), include_buffers: bool = False):
+
     old_register_parameter = torch.nn.Module.register_parameter
     if include_buffers:
         old_register_buffer = torch.nn.Module.register_buffer
-    
+
     def register_empty_parameter(module, name, param):
         old_register_parameter(module, name, param)
         if param is not None:
@@ -89,14 +86,14 @@ def init_weights_on_device(device = torch.device("meta"), include_buffers :bool 
         old_register_buffer(module, name, buffer, persistent=persistent)
         if buffer is not None:
             module._buffers[name] = module._buffers[name].to(device)
-            
+
     def patch_tensor_constructor(fn):
         def wrapper(*args, **kwargs):
             kwargs["device"] = device
             return fn(*args, **kwargs)
 
         return wrapper
-    
+
     if include_buffers:
         tensor_constructors_to_patch = {
             torch_function_name: getattr(torch, torch_function_name)
@@ -104,7 +101,7 @@ def init_weights_on_device(device = torch.device("meta"), include_buffers :bool 
         }
     else:
         tensor_constructors_to_patch = {}
-    
+
     try:
         torch.nn.Module.register_parameter = register_empty_parameter
         if include_buffers:
@@ -123,9 +120,7 @@ def init_weights_on_device(device = torch.device("meta"), include_buffers :bool 
 def load_state_dict_from_folder(file_path, torch_dtype=None):
     state_dict = {}
     for file_name in os.listdir(file_path):
-        if "." in file_name and file_name.split(".")[-1] in [
-            "safetensors", "bin", "ckpt", "pth", "pt"
-        ]:
+        if "." in file_name and file_name.split(".")[-1] in ["safetensors", "bin", "ckpt", "pth", "pt"]:
             state_dict.update(load_state_dict(os.path.join(file_path, file_name), torch_dtype=torch_dtype))
     return state_dict
 
@@ -164,7 +159,8 @@ def convert_state_dict_keys_to_single_str(state_dict, with_shape=True):
                 if with_shape:
                     shape = "_".join(map(str, list(value.shape)))
                     keys.append(key + ":" + shape)
-                keys.append(key)
+                else:
+                    keys.append(key)
             elif isinstance(value, dict):
                 keys.append(key + "|" + convert_state_dict_keys_to_single_str(value, with_shape=with_shape))
     keys.sort()
@@ -175,7 +171,7 @@ def convert_state_dict_keys_to_single_str(state_dict, with_shape=True):
 def split_state_dict_with_prefix(state_dict):
     keys = sorted([key for key in state_dict if isinstance(key, str)])
     prefix_dict = {}
-    for key in  keys:
+    for key in keys:
         prefix = key if "." not in key else key.split(".")[0]
         if prefix not in prefix_dict:
             prefix_dict[prefix] = []

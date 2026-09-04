@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 OmniFlow distributed training utilities.
 
@@ -7,14 +13,9 @@ Modules:
   ulysses     - Ulysses Sequence Parallel primitives
 """
 
-from .mesh import create_device_mesh, setup_distributed
 from .checkpoint import load_checkpoint_dtcp, save_checkpoint_dtcp
-from .ulysses import (
-    distributed_attention,
-    sp_gather,
-    sp_split,
-    sp_unpad,
-)
+from .mesh import create_device_mesh, setup_distributed
+from .ulysses import distributed_attention, sp_gather, sp_split, sp_unpad
 
 __all__ = [
     # mesh

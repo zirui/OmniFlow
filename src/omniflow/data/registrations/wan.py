@@ -2,7 +2,9 @@
 
 from loguru import logger
 
-from omniflow.data import DatasetConfig, WanVideoDataProcessor, WanVideoDataset
+from omniflow.data.config import DatasetConfig
+from omniflow.data.dataset import WanVideoDataset
+from omniflow.data.processor import WanVideoDataProcessor
 from omniflow.registry import register_dataset
 
 

@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 AdamW that keeps optimizer state in FP32 even when parameters are BF16/FP16.
 
@@ -103,4 +109,3 @@ class AdamWFP32State(torch.optim.Optimizer):
                 p.copy_(p_fp32.to(dtype=p.dtype))
 
         return loss
-

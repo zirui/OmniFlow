@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Distributed Tensor Checkpointing (DTCP) save / load utilities.
 
@@ -6,17 +12,13 @@ Handles FSDP2 sharded checkpoints without gathering to rank 0.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Dict, Optional
 
 import torch
 import torch.distributed as dist
-from torch.distributed.checkpoint import (
-    FileSystemReader,
-    FileSystemWriter,
-    load,
-    save,
-)
+from torch.distributed.checkpoint import FileSystemReader, FileSystemWriter, load, save
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -24,9 +26,12 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
-from loguru import logger
+
+from omniflow.utils.log import logger
 
 from .mesh import _ensure_process_group
+
+_META_FILENAME = "meta.json"
 
 
 def save_checkpoint_dtcp(
@@ -52,14 +57,17 @@ def save_checkpoint_dtcp(
     if optimizer is not None:
         optim_state = get_optimizer_state_dict(model, optimizer, options=optim_state_options)
 
+    meta = {"epoch": epoch, "step": step, **(additional_data or {})}
     state_dict = {
         "model": model_state,
         **({"optimizer": optim_state} if optim_state is not None else {}),
-        "meta": {"epoch": epoch, "step": step, **(additional_data or {})},
+        "meta": meta,
     }
 
     save(state_dict, FileSystemWriter(path))
     if (not dist.is_initialized()) or dist.get_rank() == 0:
+        with open(os.path.join(path, _META_FILENAME), "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, sort_keys=True)
         logger.info(f"Saved DTCP checkpoint to {path}")
 
 
@@ -88,6 +96,7 @@ def load_checkpoint_dtcp(
     state_dict = {
         "model": model_state,
         **({"optimizer": optim_state} if optim_state is not None else {}),
+        "meta": {},
     }
 
     load(state_dict, FileSystemReader(path))
@@ -96,4 +105,10 @@ def load_checkpoint_dtcp(
     if optimizer is not None and optim_state is not None:
         set_optimizer_state_dict(model, optimizer, optim_state, options=optim_state_options)
 
-    return state_dict.get("meta", {})
+    meta = state_dict.get("meta", {})
+    if not meta:
+        meta_path = os.path.join(path, _META_FILENAME)
+        if os.path.exists(meta_path):
+            with open(meta_path, encoding="utf-8") as f:
+                meta = json.load(f)
+    return meta

@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 FlexAttention backend — pure PyTorch, relies on torch.compile for performance.
 
@@ -24,10 +30,7 @@ _flex_attention_compiled = None
 _create_block_mask = None
 
 try:
-    from torch.nn.attention.flex_attention import (
-        create_block_mask,
-        flex_attention,
-    )
+    from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
     # torch.compile is essential for FlexAttention performance — without it,
     # score_mod/block_mask run as eager Python callbacks (separate kernel per op).
@@ -55,6 +58,7 @@ def _get_flex_attention():
         return _flex_attention_compiled
 
     import logging
+
     logger = logging.getLogger(__name__)
     try:
         compiled = torch.compile(_flex_attention_eager)
@@ -76,10 +80,12 @@ def _flex_attention_with_fallback(q, k, v, **kwargs):
         if fn is _flex_attention_eager:
             raise  # already in eager mode, real error
         import logging
+
         logger = logging.getLogger(__name__)
         logger.warning(
             "flex_attention: compiled call failed (%s: %s), falling back to eager mode",
-            type(e).__name__, e,
+            type(e).__name__,
+            e,
         )
         _flex_attention_compiled = _flex_attention_eager
         return _flex_attention_eager(q, k, v, **kwargs)
@@ -249,8 +255,12 @@ def flex_attention_fn(
 
     # Build block mask (handles padding, causal, window in the mask itself)
     block_mask = _build_block_mask(
-        B=B, N=N, Lq=Lq, Lk=Lk,
-        q_lens=q_lens, k_lens=k_lens,
+        B=B,
+        N=N,
+        Lq=Lq,
+        Lk=Lk,
+        q_lens=q_lens,
+        k_lens=k_lens,
         device=q.device,
         causal=causal,
         window_size=window_size,

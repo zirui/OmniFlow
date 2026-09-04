@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -82,20 +88,27 @@ def run_flash_attention_backend(
     if q_scale is not None:
         q = q * q_scale
 
-    cu_seqlens_q = torch.cat([q_lens.new_zeros([1]), q_lens]).cumsum(0, dtype=torch.int32).to(
-        q.device, non_blocking=True
+    cu_seqlens_q = (
+        torch.cat([q_lens.new_zeros([1]), q_lens])
+        .cumsum(0, dtype=torch.int32)
+        .to(q.device, non_blocking=True)
     )
-    cu_seqlens_k = torch.cat([k_lens.new_zeros([1]), k_lens]).cumsum(0, dtype=torch.int32).to(
-        q.device, non_blocking=True
+    cu_seqlens_k = (
+        torch.cat([k_lens.new_zeros([1]), k_lens])
+        .cumsum(0, dtype=torch.int32)
+        .to(q.device, non_blocking=True)
     )
+    max_sq = int(q_lens.max())
+    max_sk = int(k_lens.max())
+
     x = varlen_attention(
         q=q,
         k=k,
         v=v,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
-        max_seqlen_q=lq,
-        max_seqlen_k=lk,
+        max_seqlen_q=max_sq,
+        max_seqlen_k=max_sk,
         dropout_p=dropout_p,
         softmax_scale=softmax_scale,
         causal=causal,
@@ -103,4 +116,15 @@ def run_flash_attention_backend(
         deterministic=deterministic,
         **varlen_extra_kwargs,
     )
-    return _unwrap_output(x).unflatten(0, (b, lq)).type(out_dtype)
+    # Pad output back to (b, lq) shape to match the input padded layout
+    out = _unwrap_output(x)
+    if max_sq == lq:
+        return out.unflatten(0, (b, lq)).type(out_dtype)
+    # Variable-length: need to scatter back into padded tensor
+    result = q.new_zeros(b, lq, *out.shape[1:])
+    offset = 0
+    for i in range(b):
+        sl = int(q_lens[i])
+        result[i, :sl] = out[offset : offset + sl]
+        offset += sl
+    return result.type(out_dtype)

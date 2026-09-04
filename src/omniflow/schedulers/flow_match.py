@@ -1,4 +1,11 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 import math
+
 import torch
 
 
@@ -47,7 +54,16 @@ class FlowMatchScheduler:
         if self.inverse_timesteps:
             self.sigmas = torch.flip(self.sigmas, dims=[0])
         if self.exponential_shift:
-            mu = self.calculate_shift(dynamic_shift_len) if dynamic_shift_len is not None else self.exponential_shift_mu
+            mu = (
+                self.calculate_shift(dynamic_shift_len)
+                if dynamic_shift_len is not None
+                else self.exponential_shift_mu
+            )
+            if mu is None:
+                raise ValueError(
+                    "`exponential_shift=True` requires either `dynamic_shift_len` "
+                    "or `exponential_shift_mu`."
+                )
             self.sigmas = math.exp(mu) / (math.exp(mu) + (1 / self.sigmas - 1))
         else:
             self.sigmas = self.shift * self.sigmas / (1 + (self.shift - 1) * self.sigmas)

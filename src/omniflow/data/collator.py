@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 import collections
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -13,7 +19,9 @@ class VisionCollator:
     def pad_sequence(self, input_ids, batch_first, padding_value):
         if self.processor.tokenizer.padding_side == "left":
             input_ids = [torch.flip(_input_ids, [0]) for _input_ids in input_ids]
-        input_ids = torch.nn.utils.rnn.pad_sequence(input_ids, batch_first=batch_first, padding_value=padding_value)
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            input_ids, batch_first=batch_first, padding_value=padding_value
+        )
         if self.processor.tokenizer.padding_side == "left":
             input_ids = torch.flip(input_ids, [1])
         return input_ids
@@ -27,6 +35,7 @@ class VisionCollator:
                 inputs[key].append(values)
 
         batched_inputs = {}
+        input_ids = None
         if "input_ids" in inputs:
             input_ids = inputs.pop("input_ids")
             input_ids = self.pad_sequence(
@@ -44,11 +53,18 @@ class VisionCollator:
             )
             batched_inputs["labels"] = labels
 
+        attention_mask = None
         if "attention_mask" in inputs:
-            inputs.pop("attention_mask")
+            attention_mask = inputs.pop("attention_mask")
 
-        attention_mask = input_ids.ne(self.processor.tokenizer.pad_token_id).long()
-        batched_inputs["attention_mask"] = attention_mask
+        if input_ids is not None:
+            batched_inputs["attention_mask"] = input_ids.ne(self.processor.tokenizer.pad_token_id).long()
+        elif attention_mask is not None:
+            batched_inputs["attention_mask"] = self.pad_sequence(
+                attention_mask,
+                batch_first=True,
+                padding_value=0,
+            )
 
         # for the other keys
         for key, values in inputs.items():

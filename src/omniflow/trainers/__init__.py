@@ -1,6 +1,11 @@
-"""Trainer registrations."""
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
 
-# from .base import BaseNativeTrainer, create_lr_scheduler
-from .fsdp import build_fsdp_trainer
+"""Trainer registrations for the OmniFlow backend."""
+
 from .fsdp2 import build_fsdp2_trainer
-from .hf import build_hf_trainer
+
+__all__ = ["build_fsdp2_trainer"]

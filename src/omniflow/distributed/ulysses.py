@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Ulysses Sequence Parallel primitives.
 
@@ -23,10 +29,19 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-
 # ---------------------------------------------------------------------------
 # Core autograd primitives
 # ---------------------------------------------------------------------------
+
+
+def _require_divisible_dim(x: torch.Tensor, dim: int, divisor: int, op_name: str) -> None:
+    size = x.shape[dim]
+    if size % divisor != 0:
+        raise ValueError(
+            f"{op_name} requires tensor dimension {dim} (size={size}) to be divisible by "
+            f"sequence parallel size {divisor}. Got shape={tuple(x.shape)}."
+        )
+
 
 class _SeqAllToAll(torch.autograd.Function):
     """All-to-all with autograd.  Backward is the inverse (swap dims)."""
@@ -37,6 +52,7 @@ class _SeqAllToAll(torch.autograd.Function):
         ctx.scatter_dim = scatter_dim
         ctx.gather_dim = gather_dim
         sp_size = dist.get_world_size(group)
+        _require_divisible_dim(x, scatter_dim, sp_size, "_SeqAllToAll")
         input_list = [t.contiguous() for t in x.tensor_split(sp_size, scatter_dim)]
         output_list = [torch.empty_like(input_list[0]) for _ in range(sp_size)]
         dist.all_to_all(output_list, input_list, group=group)
@@ -62,6 +78,7 @@ class _SliceWithGather(torch.autograd.Function):
         sp_size = dist.get_world_size(group)
         sp_rank = dist.get_rank(group)
         ctx.sp_size = sp_size
+        _require_divisible_dim(x, dim, sp_size, "_SliceWithGather")
         chunk_size = x.shape[dim] // sp_size
         return x.narrow(dim, sp_rank * chunk_size, chunk_size).contiguous()
 
@@ -97,6 +114,7 @@ class _GatherWithSlice(torch.autograd.Function):
 # ---------------------------------------------------------------------------
 # Public API — high-level
 # ---------------------------------------------------------------------------
+
 
 def distributed_attention(
     q: torch.Tensor,
@@ -157,6 +175,7 @@ def sp_split(
 # Public API — low-level (used directly for gathering the output)
 # ---------------------------------------------------------------------------
 
+
 def sp_slice(x: torch.Tensor, dim: int, group: dist.ProcessGroup) -> torch.Tensor:
     """Slice ``x`` along *dim* for this SP rank (with autograd). Low-level."""
     return _SliceWithGather.apply(x, dim, group)
@@ -177,6 +196,7 @@ def sp_unpad(x: torch.Tensor, dim: int, original_size: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _sp_pad(x: torch.Tensor, dim: int, sp_size: int) -> Tuple[torch.Tensor, int]:
     """Pad *x* along *dim* so its size is divisible by *sp_size*."""

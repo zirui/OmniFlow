@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Unified attention entry points.
 
@@ -71,9 +77,7 @@ def set_attention_backend(backend: str) -> None:
         hint = ""
         if backend.startswith("flash_atten"):
             hint = " (did you mean 'flash_attn2' / 'flash_attn3'?)"
-        raise ValueError(
-            f"attention_backend must be one of {_VALID_BACKENDS}, got '{backend}'{hint}"
-        )
+        raise ValueError(f"attention_backend must be one of {_VALID_BACKENDS}, got '{backend}'{hint}")
     _ATTENTION_BACKEND = backend
 
 
@@ -315,7 +319,7 @@ def attention(
     resolved = _resolve_flash_version(q.device.type)
     if resolved is not None:
         version = resolved
-        # Only "auto" allows call-site override (useful for debugging).
+        # Only "auto" allows call-site override.
         if _ATTENTION_BACKEND == "auto" and fa_version is not None:
             version = fa_version
         return flash_attention(
@@ -334,7 +338,7 @@ def attention(
             version=version,
         )
 
-    # FlexAttention path (native PyTorch, requires torch.compile for perf)
+    # FlexAttention path (PyTorch, requires torch.compile for perf)
     if _ATTENTION_BACKEND == "flex_attention":
         from .flex import flex_attention_fn
 

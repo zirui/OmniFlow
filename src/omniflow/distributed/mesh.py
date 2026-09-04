@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Device mesh creation and distributed setup.
 
@@ -20,7 +26,8 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from loguru import logger
+
+from omniflow.utils.log import logger
 
 
 def _ensure_process_group(*, backend: str) -> None:
@@ -85,8 +92,7 @@ def create_device_mesh(
     dp_shard = world_size // (sp_size * dp_replicate)
     if dp_shard * sp_size * dp_replicate != world_size:
         raise ValueError(
-            f"world_size={world_size} is not divisible by "
-            f"sp_size={sp_size} * dp_replicate={dp_replicate}"
+            f"world_size={world_size} is not divisible by " f"sp_size={sp_size} * dp_replicate={dp_replicate}"
         )
 
     # Build mesh dimensions

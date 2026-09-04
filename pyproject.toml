@@ -20,7 +20,14 @@ dependencies = [
   "decord",
   "imageio[ffmpeg]",
   "pydantic",
+  "pyyaml",
+  "requests",
+  "packaging",
+  "tqdm",
   "wandb",
+  "datasets>=3.6.0",
+  "huggingface-hub",
+  "sentencepiece",
   "transformers==4.50.0",
   "peft==0.10.0",
   # "accelerate",
@@ -41,6 +48,11 @@ rocm7-1 = [
     "torch==2.10.0+rocm7.1",
     "torchvision==0.25.0+rocm7.1",
     "triton-rocm==3.6.0",
+]
+mlperf = [
+  "webdataset==1.0.2",
+  "mlperf-logging @ git+https://github.com/mlcommons/logging.git@6.0.0-rc5",
+  "mlperf-common @ git+https://github.com/NVIDIA/mlperf-common.git@b86d175a05849d650a8ff69c1e2c37b9f4e61d51",
 ]
 torchtitan = [
     "torchdata>=0.8.0",

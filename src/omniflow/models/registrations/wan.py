@@ -3,7 +3,7 @@
 import torch
 from loguru import logger
 
-from omniflow.models import WanVideoConfig, WanVideoForConditionalGeneration
+from omniflow.models.wan import WanVideoConfig, WanVideoForConditionalGeneration
 from omniflow.registry import register_model
 from omniflow.utils.train_utils import count_parameters
 
