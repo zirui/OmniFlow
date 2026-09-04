@@ -12,7 +12,7 @@ export FLUX_CONFIG=${FLUX_CONFIG:-config_4n_gbs1024.sh}
 source "$SCRIPT_DIR/$FLUX_CONFIG"
 export EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-$LOCAL_BATCH_SIZE}
 
-: "${DOCKER_IMAGE:?Set DOCKER_IMAGE to a compatible ROCm/PyTorch image}"
+export DOCKER_IMAGE=${DOCKER_IMAGE:-zirui3/primus-v26.3-flux:v0.4}
 export CONTAINER_NAME=${CONTAINER_NAME:-omniflow-mlperf-flux1-${SLURM_JOB_ID:-local}-${SLURM_PROCID:-0}}
 export NNODES=${NNODES:-1}
 export NODE_RANK=${NODE_RANK:-${SLURM_NODEID:-0}}

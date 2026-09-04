@@ -152,7 +152,7 @@ cd third_party/torchtitan && bash -x torchtitan/experiments/wan/run_train.sh
 The standalone native PyTorch recipe is under [`examples/mlperf/flux1`](examples/mlperf/flux1/README.md):
 
 ```bash
-DOCKER_IMAGE=omniflow-flux:latest \
+DOCKER_IMAGE=zirui3/primus-v26.3-flux:v0.4 \
 DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
 FLUX_CONFIG=config_1n_gbs512.sh \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh

@@ -6,7 +6,7 @@ Start from the OmniFlow repository root:
 REPO=/shared_nfs/zirui/code/OmniFlow
 DATA_ROOT=/shared_nfs/zirui/data
 OUTPUT_ROOT=/shared_nfs/zirui/runs/flux-$(date -u +%Y%m%dT%H%M%SZ)
-DOCKER_IMAGE=omniflow-flux:latest
+DOCKER_IMAGE=zirui3/primus-v26.3-flux:v0.4
 cd "$REPO"
 export DOCKER_IMAGE
 ```
@@ -26,7 +26,7 @@ Do not start one Slurm task per GPU. `torchrun` owns the node-local workers.
 
 ```bash
 export DATA_ROOT OUTPUT_ROOT
-FLUX_CONFIG=config_4n_gbs1024.sh \
+FLUX_CONFIG=config_2n_gbs1024.sh \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
@@ -46,8 +46,8 @@ contiguous `NODE_RANK` values:
 ```bash
 spur run --jobid=<job-id> --overlap -N1 -n1 --nodelist=<node> \
   env DATA_ROOT="$DATA_ROOT" OUTPUT_ROOT="$OUTPUT_ROOT" \
-      NNODES=4 NODE_RANK=<rank> MASTER_ADDR=<rank-0-ip> MASTER_PORT=29601 \
-      FLUX_CONFIG=config_4n_gbs1024.sh \
+      NNODES=2 NODE_RANK=<rank> MASTER_ADDR=<rank-0-ip> MASTER_PORT=29601 \
+      FLUX_CONFIG=config_2n_gbs1024.sh \
       bash "$REPO/examples/mlperf/flux1/run_with_docker.sh"
 ```
 
