@@ -30,6 +30,19 @@ FLUX_CONFIG=config_2n_gbs1024.sh \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
+The qualified four-node DP32 native-FP8-AllGather run uses the v0.4.1 image,
+which adds Primus-Turbo PR492 to v0.4:
+
+```bash
+DOCKER_IMAGE=zirui3/primus-v26.3-flux:v0.4.1 \
+FLUX_CONFIG=config_4n_gbs1024.sh \
+DP_REPLICATE=1 FLUX_FP8_ALL_GATHER=1 \
+TORCH_COMPILE_MODE=default LOG_FREQ=1 \
+NCCL_DMABUF_ENABLE=0 \
+NCCL_SOCKET_IFNAME=fenic GLOO_SOCKET_IFNAME=fenic \
+bash examples/mlperf/flux1/run_with_docker_slurm.sh
+```
+
 The allocation node count must match the selected profile. For a short smoke
 test, add:
 

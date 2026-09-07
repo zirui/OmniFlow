@@ -4,13 +4,11 @@ This recipe runs FLUX.1-Schnell directly with PyTorch FSDP2. It has no Primus
 CLI or Primus Python-package dependency.
 
 The qualified profiles target MI355X GPUs, tensorwise FP8, and the MLPerf
-validation-loss threshold `0.586`. They use the validated image:
+validation-loss threshold `0.586`. The base image is
+`zirui3/primus-v26.3-flux:v0.4`; the DP32 PR492 run uses
+`zirui3/primus-v26.3-flux:v0.4.1`.
 
-```bash
-docker pull zirui3/primus-v26.3-flux:v0.4
-```
-
-The image provides the optional `primus_turbo` FlyDSL kernels; training still
+Both images provide the optional `primus_turbo` FlyDSL kernels; training still
 runs directly through OmniFlow without the Primus CLI or Python framework.
 
 ## Data
@@ -63,10 +61,9 @@ FLUX_CONFIG=config_1n_gbs512.sh \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
-For the fastest four-node path, set `FLUX_FP8_ALL_GATHER=1` and provide
-node-local exact max-autotune caches with
-`TORCHINDUCTOR_CACHE_SEED=/output/cache-node%r.tar.zst`. `%r` resolves to
-`NODE_RANK`; no additional profile file is required.
+Enable native FP8 parameter AllGather with `FLUX_FP8_ALL_GATHER=1`; no
+additional profile file is required. See [README-dev.md](README-dev.md) for the
+qualified DP32 + PR492 command and node-local exact-cache setup.
 
 `run_with_docker_slurm.sh` starts one container per node;
 `run_with_docker.sh` starts one `torchrun` worker per GPU. Set `DOCKER_IMAGE`

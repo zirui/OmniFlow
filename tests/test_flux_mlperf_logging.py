@@ -154,20 +154,13 @@ def test_mlperf_training_blocks_are_paired_at_eval_frequency():
     ] == [0, 262144, 262144, 524288]
 
 
-def test_mlperf_warmup_preserves_training_state_and_uses_synthetic_batches():
+def test_mlperf_warmup_preserves_training_state_and_uses_real_batches():
     trainer = BaseWanTrainer.__new__(BaseWanTrainer)
     trainer.model = torch.nn.Linear(2, 1)
     trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.1)
-    synthetic_calls = []
-
-    def make_synthetic_batch(batch_size, *, include_timestep=False):
-        synthetic_calls.append((batch_size, include_timestep))
-        return torch.ones(batch_size, 2)
-
-    trainer.processing_class = SimpleNamespace(make_synthetic_batch=make_synthetic_batch)
-    trainer.eval_processor = trainer.processing_class
-    trainer.per_device_train_batch_size = 3
-    trainer.per_device_eval_batch_size = 4
+    train_batch = torch.ones(3, 2)
+    trainer.eval_processor = SimpleNamespace()
+    trainer.eval_dataloader = [torch.ones(4, 2)]
     trainer.mlperf_warmup_train_steps = 2
     trainer.mlperf_warmup_validation_steps = 1
     trainer._clip_grad_norm = lambda: None
@@ -186,9 +179,8 @@ def test_mlperf_warmup_preserves_training_state_and_uses_synthetic_batches():
         parameter.detach().clone() for parameter in trainer.model.parameters()
     ]
 
-    trainer._mlperf_warmup()
+    trainer._mlperf_warmup(train_batch)
 
-    assert synthetic_calls == [(3, False), (4, True)]
     assert calls == [(3, None), (3, None), (4, trainer.eval_processor)]
     assert trainer.optimizer.state == {}
     assert all(parameter.grad is None for parameter in trainer.model.parameters())
