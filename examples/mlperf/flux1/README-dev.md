@@ -91,15 +91,17 @@ per cache-producing node, then route node-local archives with `%r`:
 # Run separately on cache-producing nodes; use a distinct OUTPUT_ROOT each time.
 TORCHINDUCTOR_CACHE_SEED="$GENERIC_CACHE" \
 TORCHINDUCTOR_CACHE_EXPORT=/output/cache-node0.tar.zst \
-MAX_STEPS=20 MLPERF_ENABLE=true SAVE_STRATEGY=none \
+TORCH_COMPILE_MODE=max-autotune-no-cudagraphs \
+FLUX_FP8_ALL_GATHER=1 MAX_STEPS=20 MLPERF_ENABLE=true SAVE_STRATEGY=none \
 DATA_ROOT="$DATA_ROOT" OUTPUT_ROOT="$OUTPUT_ROOT" \
-FLUX_CONFIG=config_1n_dp8_fp8_allgather.sh \
+FLUX_CONFIG=config_1n_gbs1024.sh \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 
 # Place cache-node0.tar.zst ... cache-node3.tar.zst under OUTPUT_ROOT.
 TORCHINDUCTOR_CACHE_SEED=/output/cache-node%r.tar.zst \
+FLUX_FP8_ALL_GATHER=1 \
 DATA_ROOT="$DATA_ROOT" OUTPUT_ROOT="$OUTPUT_ROOT" \
-FLUX_CONFIG=config_4n_dp8_fp8_allgather.sh \
+FLUX_CONFIG=config_4n_gbs1024.sh \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 

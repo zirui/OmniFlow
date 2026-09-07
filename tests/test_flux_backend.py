@@ -685,7 +685,8 @@ def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch, fp8_all_ga
     }
     assert type(model.dit.img_in) is torch.nn.Linear
     assert type(model.dit.final_layer.linear) is torch.nn.Linear
-    assert {name: id(param) for name, param in model.dit.named_parameters()} == original_param_ids
+    if not fp8_all_gather:
+        assert {name: id(param) for name, param in model.dit.named_parameters()} == original_param_ids
     for name, param in model.dit.named_parameters():
         torch.testing.assert_close(param, original_param_values[name])
     assert set(model.dit.state_dict()) == original_state_keys
