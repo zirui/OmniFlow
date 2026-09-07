@@ -615,7 +615,8 @@ def test_flux_rejects_unsupported_float8_recipe():
         build_flux_model({"config": {"float8_recipe": "delayed"}})
 
 
-def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch):
+@pytest.mark.parametrize("fp8_all_gather", [False, True])
+def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch, fp8_all_gather):
     torchao_float8 = pytest.importorskip("torchao.float8")
     float8_linear = pytest.importorskip("torchao.float8.float8_linear")
     real_convert = torchao_float8.convert_to_float8_training
@@ -629,6 +630,10 @@ def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch):
         return real_convert(module, module_filter_fn=module_filter_fn, config=config)
 
     monkeypatch.setattr(torchao_float8, "convert_to_float8_training", tracked_convert)
+    if fp8_all_gather:
+        monkeypatch.setenv("FLUX_FP8_ALL_GATHER", "1")
+    else:
+        monkeypatch.delenv("FLUX_FP8_ALL_GATHER", raising=False)
 
     def fake_load_weights(dit, *args, **kwargs):
         events.append("load")
@@ -685,7 +690,7 @@ def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch):
         torch.testing.assert_close(param, original_param_values[name])
     assert set(model.dit.state_dict()) == original_state_keys
     assert model.dit.double_blocks[0].img_attn.qkv.config.pad_inner_dim is False
-    assert model.dit.double_blocks[0].img_attn.qkv.config.enable_fsdp_float8_all_gather is False
+    assert model.dit.double_blocks[0].img_attn.qkv.config.enable_fsdp_float8_all_gather is fp8_all_gather
     assert (
         model.dit.double_blocks[0].img_attn.qkv.config.cast_config_input_for_grad_weight.scaling_type.value
         == "disabled"

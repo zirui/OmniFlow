@@ -647,9 +647,18 @@ class BaseWanTrainer:
         )
         self.mlperf_logger.start(key=c.INIT_START)
 
-    def _mlperf_warmup(self, train_batch) -> None:
+    def _mlperf_warmup(self) -> None:
         if not (self.mlperf_warmup_train_steps or self.mlperf_warmup_validation_steps):
             return
+
+        make_train_batch = getattr(self.processing_class, "make_synthetic_batch", None)
+        make_eval_batch = getattr(self.eval_processor, "make_synthetic_batch", None)
+        if not callable(make_train_batch) or not callable(make_eval_batch):
+            raise RuntimeError("MLPerf warmup requires synthetic batches from the data processor.")
+        train_batch = make_train_batch(self.per_device_train_batch_size)
+        eval_batch = make_eval_batch(
+            self.per_device_eval_batch_size, include_timestep=True
+        )
 
         python_rng = random.getstate()
         cpu_rng = torch.random.get_rng_state()
@@ -664,12 +673,9 @@ class BaseWanTrainer:
 
             if self.mlperf_warmup_validation_steps:
                 self.model.eval()
-                eval_batches = iter(self.eval_dataloader)
                 with torch.no_grad():
                     for _ in range(self.mlperf_warmup_validation_steps):
-                        self.compute_loss(
-                            next(eval_batches), processor=self.eval_processor
-                        )
+                        self.compute_loss(eval_batch, processor=self.eval_processor)
 
             for module in self.model.modules():
                 reset = getattr(module, "reset_fp8_meta_tensors", None)
@@ -1029,10 +1035,22 @@ class BaseWanTrainer:
         if hasattr(core, "freeze_except"):
             core.freeze_except()
 
+        precompute_fp8_scales = None
+        if os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1":
+            from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
+
+            precompute_fp8_scales = precompute_float8_dynamic_scale_for_fsdp
+            precompute_fp8_scales(self.model)
+
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         torch.cuda.reset_peak_memory_stats()
         self._start_profiler()
+
+        if self.mlperf_enabled:
+            self._mlperf_warmup()
+            self._mlperf_log_train_start()
+            self._mlperf_log_block_start(self.global_step)
 
         start_time = time.time()
         last_log_time = start_time
@@ -1041,7 +1059,6 @@ class BaseWanTrainer:
         update_steps_since_log = 0
         update_loss_sum = None
         update_loss_count = 0
-        mlperf_train_started = False
 
         steps_per_epoch = math.ceil(
             len(self.dataloader) / max(1, self.grad_accum_steps)
@@ -1064,12 +1081,6 @@ class BaseWanTrainer:
             for batch_idx, batch in enumerate(self.dataloader):
                 if self.rank == 0 and self.global_step == 0 and batch_idx == 0:
                     logger.info("First training batch loaded; entering forward pass")
-                if self.mlperf_enabled and not mlperf_train_started:
-                    self._mlperf_warmup(batch)
-                    start_time = last_log_time = time.time()
-                    self._mlperf_log_train_start()
-                    self._mlperf_log_block_start(self.global_step)
-                    mlperf_train_started = True
                 is_update_step = ((batch_idx + 1) % max(1, self.grad_accum_steps)) == 0
                 local_samples_in_update += self._infer_local_batch_size(batch)
 
@@ -1107,6 +1118,8 @@ class BaseWanTrainer:
                     grad_norm = self._clip_grad_norm()
 
                     self.optimizer.step()
+                    if precompute_fp8_scales is not None:
+                        precompute_fp8_scales(self.model)
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1

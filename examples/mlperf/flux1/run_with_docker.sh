@@ -31,6 +31,7 @@ export PROFILE_WARMUP_STEPS=${PROFILE_WARMUP_STEPS:-2}
 export PROFILE_ACTIVE_STEPS=${PROFILE_ACTIVE_STEPS:-5}
 export PROFILE_OUTPUT_DIR=${PROFILE_OUTPUT_DIR:-$OUTPUT_DIR/torch_profile}
 export PROFILE_WITH_STACK=${PROFILE_WITH_STACK:-false}
+export HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-$(seq -s, 0 $((GPUS_PER_NODE - 1)))}
 
 actual_gbs=$((NNODES * GPUS_PER_NODE * LOCAL_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS))
 [[ "$actual_gbs" == "$GLOBAL_BATCH_SIZE" ]] || {
@@ -70,7 +71,7 @@ if (( NNODES > 1 )) && [[ "${NCCL_IB_DISABLE:-0}" != "1" ]]; then
 fi
 
 env_names=(
-    FLUX_CONFIG NNODES NODE_RANK MASTER_ADDR MASTER_PORT GPUS_PER_NODE DP_REPLICATE CONFIG
+    FLUX_CONFIG NNODES NODE_RANK MASTER_ADDR MASTER_PORT GPUS_PER_NODE HIP_VISIBLE_DEVICES DP_REPLICATE CONFIG
     DATASET_PATH EVAL_DATASET_PATH EMPTY_ENCODINGS_PATH OUTPUT_DIR
     MLLOG_OUTPUT_FILE MLLOG_SUBMISSION_DIVISION MLLOG_SUBMISSION_ORG MLLOG_SUBMISSION_PLATFORM
     MLLOG_SUBMISSION_POC_NAME MLLOG_SUBMISSION_POC_EMAIL MLLOG_SUBMISSION_STATUS
@@ -80,7 +81,8 @@ env_names=(
     GRADIENT_CHECKPOINTING GRADIENT_CHECKPOINTING_RATIO COMPILE_TRANSFORMER_BLOCKS COMPILE_STRATEGY
     COMPILE_BACKEND COMPILE_FULLGRAPH COMPILE_DYNAMIC COMPILE_OUTPUT_HEAD TORCH_COMPILE_MODE
     TORCHINDUCTOR_CACHE_DIR TORCHINDUCTOR_CACHE_SEED TORCHINDUCTOR_CACHE_EXPORT
-    FSDP2_RESHARD_AFTER_FORWARD FSDP2_REDUCE_DTYPE
+    TORCHINDUCTOR_CACHE_EXPORT_EXCLUDE_TRITON
+    FSDP2_RESHARD_AFTER_FORWARD FSDP2_REDUCE_DTYPE FLUX_FP8_ALL_GATHER
     PROFILE PROFILE_RANK PROFILE_WAIT_STEPS PROFILE_WARMUP_STEPS PROFILE_ACTIVE_STEPS
     PROFILE_OUTPUT_DIR PROFILE_WITH_STACK FSDP2_HSDP_FP8_ALL_REDUCE FSDP2_HSDP_FP8_BLOCK_SIZE PIN_FLUX_T5_STACK
     FLUX_PERFORMANCE_MODE SAVE_STEPS SAVE_STRATEGY CHECKPOINT_KEEP_LATEST
@@ -94,6 +96,9 @@ env_names=(
     NCCL_GDR_FLUSH_DISABLE NCCL_DMABUF_ENABLE NCCL_NET_GDR_LEVEL NCCL_NET_GDR_READ
     NCCL_IGNORE_CPU_AFFINITY NCCL_CROSS_NIC NCCL_DEBUG NCCL_DEBUG_SUBSYS
     NET_OPTIONAL_RECV_COMPLETION RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING
+    HSA_ENABLE_SDMA HSA_NO_SCRATCH_RECLAIM GPU_MAX_HW_QUEUES CUDA_DEVICE_MAX_CONNECTIONS
+    TORCH_NCCL_HIGH_PRIORITY NCCL_CHECKS_DISABLE NCCL_PXN_DISABLE NCCL_P2P_NET_CHUNKSIZE
+    TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK
 )
 docker_env_args=()
 for name in "${env_names[@]}"; do
@@ -124,17 +129,18 @@ exec docker run --rm --init --privileged \
         mkdir -p "$OUTPUT_DIR"
         if [[ -n "${TORCHINDUCTOR_CACHE_SEED:-}" ]]; then
             export TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor-cache
+            cache_seed=${TORCHINDUCTOR_CACHE_SEED//%r/$NODE_RANK}
             rm -rf "$TORCHINDUCTOR_CACHE_DIR"
             mkdir -p "$TORCHINDUCTOR_CACHE_DIR"
-            if [[ -d "$TORCHINDUCTOR_CACHE_SEED" ]]; then
-                cp -a "$TORCHINDUCTOR_CACHE_SEED/." "$TORCHINDUCTOR_CACHE_DIR/"
-            elif [[ -f "$TORCHINDUCTOR_CACHE_SEED" ]]; then
-                tar --zstd -xf "$TORCHINDUCTOR_CACHE_SEED" -C "$TORCHINDUCTOR_CACHE_DIR"
+            if [[ -d "$cache_seed" ]]; then
+                cp -a "$cache_seed/." "$TORCHINDUCTOR_CACHE_DIR/"
+            elif [[ -f "$cache_seed" ]]; then
+                tar --zstd -xf "$cache_seed" -C "$TORCHINDUCTOR_CACHE_DIR"
             else
-                echo "Missing Inductor cache seed: $TORCHINDUCTOR_CACHE_SEED" >&2
+                echo "Missing Inductor cache seed: $cache_seed" >&2
                 exit 1
             fi
-            echo "[flux1] loaded Inductor cache seed into $TORCHINDUCTOR_CACHE_DIR"
+            echo "[flux1] loaded Inductor cache seed $cache_seed into $TORCHINDUCTOR_CACHE_DIR"
         fi
         if [[ "$MLPERF_CLEAR_CACHES" == "true" ]]; then
             sync
@@ -147,15 +153,18 @@ exec docker run --rm --init --privileged \
           --master_addr="$MASTER_ADDR" \
           --master_port="$MASTER_PORT" \
           train.py --config "$CONFIG"
-        if [[ -n "${TORCHINDUCTOR_CACHE_EXPORT:-}" && "$NODE_RANK" == "0" ]]; then
+        if [[ -n "${TORCHINDUCTOR_CACHE_EXPORT:-}" && ( "$NODE_RANK" == "0" || "$TORCHINDUCTOR_CACHE_EXPORT" == *%r* ) ]]; then
             [[ -n "${TORCHINDUCTOR_CACHE_DIR:-}" ]] || {
                 echo "TORCHINDUCTOR_CACHE_EXPORT requires a cache directory or seed" >&2
                 exit 1
             }
-            tmp_export="$TORCHINDUCTOR_CACHE_EXPORT.tmp.$$"
+            cache_export=${TORCHINDUCTOR_CACHE_EXPORT//%r/$NODE_RANK}
+            tmp_export="$cache_export.tmp.$$"
             rm -f "$tmp_export"
-            tar --exclude=./triton --zstd -cf "$tmp_export" -C "$TORCHINDUCTOR_CACHE_DIR" .
-            mv "$tmp_export" "$TORCHINDUCTOR_CACHE_EXPORT"
-            echo "[flux1] exported Inductor cache to $TORCHINDUCTOR_CACHE_EXPORT"
+            exclude=()
+            [[ "${TORCHINDUCTOR_CACHE_EXPORT_EXCLUDE_TRITON:-false}" == "true" ]] && exclude=(--exclude=./triton)
+            tar "${exclude[@]}" --zstd -cf "$tmp_export" -C "$TORCHINDUCTOR_CACHE_DIR" .
+            mv "$tmp_export" "$cache_export"
+            echo "[flux1] exported Inductor cache to $cache_export"
         fi
     '

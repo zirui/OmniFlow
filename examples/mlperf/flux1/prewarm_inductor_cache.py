@@ -23,7 +23,7 @@ def main() -> None:
             "model_preset": "flux.1-schnell",
             "config": {
                 "float8_recipe": "tensorwise",
-                "float8_gemm_backend": "selective_flydsl",
+                "float8_gemm_backend": os.environ.get("FLUX_FP8_GEMM_BACKEND", "selective_flydsl"),
             },
         }
     )
@@ -51,16 +51,33 @@ def main() -> None:
 
     img_out, txt_out = double(img, txt, vec, pe)
     (img_out.float().square().mean() + txt_out.float().square().mean()).backward()
-    torch.cuda.synchronize()
-    print("Prewarmed double block", flush=True)
-    del img, txt, img_out, txt_out, double
-    gc.collect()
-    torch.cuda.empty_cache()
-
     x = torch.randn((32, 512, 3072), device=device, dtype=dtype, requires_grad=True)
     single(x, vec, pe).float().square().mean().backward()
     torch.cuda.synchronize()
-    print("Prewarmed single block", flush=True)
+    print("Prewarmed batch-32 training blocks", flush=True)
+    del img, txt, img_out, txt_out, x, pe, vec
+    double.zero_grad(set_to_none=True)
+    single.zero_grad(set_to_none=True)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    eval_batch_size = int(os.environ.get("EVAL_BATCH_SIZE", "32"))
+    eval_batch_sizes = (eval_batch_size,) if eval_batch_size == 32 else (eval_batch_size, 32)
+    double.eval()
+    single.eval()
+    with torch.no_grad():
+        for batch_size in eval_batch_sizes:
+            pe = embedder(torch.zeros((batch_size, 512, 3), device=device, dtype=dtype))
+            vec = torch.randn((batch_size, 3072), device=device, dtype=dtype)
+            img = torch.randn((batch_size, 256, 3072), device=device, dtype=dtype)
+            txt = torch.randn((batch_size, 256, 3072), device=device, dtype=dtype)
+            double(img, txt, vec, pe)
+            x = torch.randn((batch_size, 512, 3072), device=device, dtype=dtype)
+            single(x, vec, pe)
+            torch.cuda.synchronize()
+            print(f"Prewarmed batch-{batch_size} evaluation blocks", flush=True)
+            del img, txt, x, pe, vec
+
     print(f"Cache ready: {cache_dir}", flush=True)
 
 

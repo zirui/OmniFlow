@@ -3,6 +3,7 @@
 export GPUS_PER_NODE=8
 export MAX_STEPS=${MAX_STEPS:-30000}
 export FLUX_FLOAT8_RECIPE=tensorwise
+export FLUX_FP8_ALL_GATHER=0
 export ATTENTION_BACKEND=flash_attn_aiter
 export PIN_FLUX_T5_STACK=1
 export GRADIENT_CHECKPOINTING=true

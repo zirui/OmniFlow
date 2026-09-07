@@ -72,15 +72,41 @@ docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
   -w /workspace/OmniFlow "$DOCKER_IMAGE" \
   python examples/mlperf/flux1/prewarm_inductor_cache.py
 
-TORCHINDUCTOR_CACHE_SEED="$CACHE_DIR" \
+# Keep graph choices but force the exact distributed build to materialize its
+# own Triton artifacts.
+GENERIC_CACHE="$CACHE_DIR-generic.tar.zst"
+tar --exclude=./triton --zstd -cf "$GENERIC_CACHE" -C "$CACHE_DIR" .
+
+TORCHINDUCTOR_CACHE_SEED="$GENERIC_CACHE" \
 TORCHINDUCTOR_CACHE_EXPORT="$CACHE_DIR-exact.tar.zst" \
 MAX_STEPS=1 MLPERF_ENABLE=false SAVE_STRATEGY=none \
 DATA_ROOT="$DATA_ROOT" OUTPUT_ROOT="$OUTPUT_ROOT" \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
-Rebuild the cache when the image, PyTorch/Triton/FlyDSL versions, model graph,
-micro-batch size, or compile settings change.
+For native FP8 AllGather, build an exact cache with one independent 8-GPU run
+per cache-producing node, then route node-local archives with `%r`:
+
+```bash
+# Run separately on cache-producing nodes; use a distinct OUTPUT_ROOT each time.
+TORCHINDUCTOR_CACHE_SEED="$GENERIC_CACHE" \
+TORCHINDUCTOR_CACHE_EXPORT=/output/cache-node0.tar.zst \
+MAX_STEPS=20 MLPERF_ENABLE=true SAVE_STRATEGY=none \
+DATA_ROOT="$DATA_ROOT" OUTPUT_ROOT="$OUTPUT_ROOT" \
+FLUX_CONFIG=config_1n_dp8_fp8_allgather.sh \
+bash examples/mlperf/flux1/run_with_docker_slurm.sh
+
+# Place cache-node0.tar.zst ... cache-node3.tar.zst under OUTPUT_ROOT.
+TORCHINDUCTOR_CACHE_SEED=/output/cache-node%r.tar.zst \
+DATA_ROOT="$DATA_ROOT" OUTPUT_ROOT="$OUTPUT_ROOT" \
+FLUX_CONFIG=config_4n_dp8_fp8_allgather.sh \
+bash examples/mlperf/flux1/run_with_docker_slurm.sh
+```
+
+On homogeneous MI355X nodes, a verified archive may be copied to another node
+rank. Never let multiple ranks write one shared cache. Rebuild the cache when
+the image, PyTorch/Triton/FlyDSL versions, model graph, batch shapes, or compile
+settings change.
 
 ## Network checks
 

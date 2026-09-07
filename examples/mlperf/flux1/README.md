@@ -44,6 +44,7 @@ batch size:
 | `config_1n_gbs1024.sh` | 1 | 32 | 4 | 1024 |
 | `config_2n_gbs1024.sh` | 2 | 32 | 2 | 1024 |
 | `config_4n_gbs1024.sh` | 4 | 32 | 1 | 1024 |
+| `config_4n_dp8_fp8_allgather.sh` | 4 | 32 | 1 | 1024 |
 
 Run inside a matching Slurm allocation:
 
@@ -62,6 +63,11 @@ DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
 FLUX_CONFIG=config_1n_gbs512.sh \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
+
+`config_4n_dp8_fp8_allgather.sh` adds TorchAO native one-byte FP8 parameter
+AllGather. With `TORCHINDUCTOR_CACHE_SEED` set, it also selects
+`max-autotune-no-cudagraphs`; use `%r` in the seed path for one exact archive
+per node rank.
 
 `run_with_docker_slurm.sh` starts one container per node;
 `run_with_docker.sh` starts one `torchrun` worker per GPU. Set `DOCKER_IMAGE`
