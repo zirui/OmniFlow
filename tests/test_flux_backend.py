@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+import types
 from unittest.mock import Mock
 
 import numpy as np
@@ -20,12 +22,14 @@ from omniflow.data.flux_precomputed import (
 from omniflow.models.flux.adapter import FluxForTraining
 from omniflow.models.flux.conditioner import HFEmbedder
 from omniflow.models.flux.layers import QKNorm
-from omniflow.models.flux.math import apply_rope
+from omniflow.models.flux.math import apply_rope, rope
 from omniflow.models.flux.math import attention as flux_attention
-from omniflow.models.flux.math import rope
 from omniflow.models.flux.model import Flux, flux_1_schnell_params
 from omniflow.models.flux.train_pipeline import FluxFlowMatchTrainPipeline
-from omniflow.models.registrations.flux import build_flux_model
+from omniflow.models.registrations.flux import (
+    _mxfp4_forward_precision,
+    build_flux_model,
+)
 from omniflow.trainers.fsdp2 import FSDP2Trainer
 
 
@@ -613,6 +617,126 @@ def test_flux_torchtitan_initialization_is_deterministic_and_zeroes_output():
 def test_flux_rejects_unsupported_float8_recipe():
     with pytest.raises(ValueError, match="float8_recipe"):
         build_flux_model({"config": {"float8_recipe": "delayed"}})
+
+
+def test_flux_rejects_unsupported_or_conflicting_mxfp4_recipe():
+    with pytest.raises(ValueError, match="mxfp4_recipe"):
+        build_flux_model({"config": {"mxfp4_recipe": "experimental"}})
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        build_flux_model(
+            {"config": {"float8_recipe": "tensorwise", "mxfp4_recipe": "pareto_a"}}
+        )
+
+
+@pytest.mark.parametrize(
+    ("recipe", "expected"),
+    [
+        ("pareto_a", {"bf16": 76, "mxfp4": 0, "mxfp8": 152}),
+        ("pareto_b", {"bf16": 19, "mxfp4": 38, "mxfp8": 171}),
+    ],
+)
+def test_flux_mxfp4_pareto_recipes_route_exact_modules(recipe, expected):
+    fqns = []
+    for index in range(19):
+        fqns.extend(
+            f"double_blocks.{index}.{suffix}"
+            for suffix in (
+                "img_attn.qkv",
+                "img_attn.proj",
+                "img_mlp.0",
+                "img_mlp.2",
+                "txt_attn.qkv",
+                "txt_attn.proj",
+                "txt_mlp.0",
+                "txt_mlp.2",
+            )
+        )
+    for index in range(38):
+        fqns.extend(
+            (f"single_blocks.{index}.linear1", f"single_blocks.{index}.linear2")
+        )
+
+    routed = {
+        precision: {
+            fqn for fqn in fqns if _mxfp4_forward_precision(fqn, recipe) == precision
+        }
+        for precision in ("bf16", "mxfp4", "mxfp8")
+    }
+
+    assert {precision: len(names) for precision, names in routed.items()} == expected
+    assert sum(map(len, routed.values())) == 228
+    if recipe == "pareto_a":
+        assert all(
+            fqn.startswith("double_blocks.")
+            and fqn.endswith(("img_attn.qkv", "img_attn.proj", "img_mlp.0", "img_mlp.2"))
+            for fqn in routed["bf16"]
+        )
+    else:
+        assert all(fqn.endswith("img_mlp.0") for fqn in routed["bf16"])
+        assert all(
+            fqn.startswith("single_blocks.") and fqn.endswith("linear2")
+            for fqn in routed["mxfp4"]
+        )
+    assert _mxfp4_forward_precision("final_layer.linear", recipe) is None
+
+
+@pytest.mark.parametrize(
+    ("recipe", "expected"),
+    [
+        ("pareto_a", {"bf16": 4, "mxfp4": 0, "mxfp8": 6}),
+        ("pareto_b", {"bf16": 1, "mxfp4": 1, "mxfp8": 8}),
+    ],
+)
+def test_flux_mxfp4_pareto_recipes_replace_only_block_linears(monkeypatch, recipe, expected):
+    backend = types.ModuleType("primus_turbo.pytorch.core.backend")
+    backend.BackendType = types.SimpleNamespace(AITER="aiter")
+    backend.PrecisionType = types.SimpleNamespace(FP4="fp4")
+    backend.GlobalBackendManager = types.SimpleNamespace(
+        get_gemm_backend=lambda precision: "aiter",
+        auto_tune_enabled=lambda: False,
+    )
+    mxfp4 = types.ModuleType("omniflow.models.flux.mxfp4")
+
+    class FakeMXFP4Linear(torch.nn.Module):
+        backward_precision = "mxfp4"
+
+        def __init__(self, linear, forward_precision):
+            super().__init__()
+            self.weight = linear.weight
+            self.bias = linear.bias
+            self.forward_precision = forward_precision
+
+    mxfp4.MXFP4Linear = FakeMXFP4Linear
+    monkeypatch.setitem(sys.modules, backend.__name__, backend)
+    monkeypatch.setitem(sys.modules, mxfp4.__name__, mxfp4)
+
+    model = build_flux_model(
+        {
+            "config": {
+                "mxfp4_recipe": recipe,
+                "params": {
+                    "in_channels": 16,
+                    "out_channels": 16,
+                    "vec_in_dim": 16,
+                    "context_in_dim": 16,
+                    "hidden_size": 16,
+                    "num_heads": 2,
+                    "depth": 1,
+                    "depth_single_blocks": 1,
+                    "axes_dim": [2, 2, 4],
+                },
+            }
+        }
+    )
+
+    converted = [module for module in model.dit.modules() if type(module) is FakeMXFP4Linear]
+    counts = dict.fromkeys(expected, 0)
+    for module in converted:
+        counts[module.forward_precision] += 1
+        assert module.backward_precision == "mxfp4"
+    assert counts == expected
+    assert type(model.dit.img_in) is torch.nn.Linear
+    assert type(model.dit.final_layer.linear) is torch.nn.Linear
 
 
 @pytest.mark.parametrize("fp8_all_gather", [False, True])

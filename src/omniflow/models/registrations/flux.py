@@ -51,6 +51,7 @@ _FP8_DOUBLE_MLP_SUFFIXES = {
     "txt_mlp.0",
     "txt_mlp.2",
 }
+_MXFP4_RECIPES = {"pareto_a", "pareto_b"}
 _FP8_SELECTIVE_GEMM_SHAPES = {
     (3072, 15360, 16384),
     (8192, 3072, 3072),
@@ -115,6 +116,37 @@ def _(grad_output, input, grad_scale, input_scale):
         device=input.device,
         dtype=torch.bfloat16,
     )
+
+
+def _mxfp4_forward_precision(fqn: str, recipe: str) -> str | None:
+    if recipe not in _MXFP4_RECIPES:
+        raise ValueError(f"Unsupported FLUX MXFP4 recipe: {recipe!r}")
+    parts = fqn.split(".", 2)
+    if len(parts) != 3:
+        return None
+    stack, _, suffix = parts
+    if stack == "double_blocks":
+        if suffix not in {
+            "img_attn.qkv",
+            "img_attn.proj",
+            "img_mlp.0",
+            "img_mlp.2",
+            "txt_attn.qkv",
+            "txt_attn.proj",
+            "txt_mlp.0",
+            "txt_mlp.2",
+        }:
+            return None
+        if recipe == "pareto_a" and suffix.startswith("img_"):
+            return "bf16"
+        if recipe == "pareto_b" and suffix == "img_mlp.0":
+            return "bf16"
+        return "mxfp8"
+    if stack == "single_blocks" and suffix in {"linear1", "linear2"}:
+        if recipe == "pareto_b" and suffix == "linear2":
+            return "mxfp4"
+        return "mxfp8"
+    return None
 
 
 def _strip_known_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -232,6 +264,13 @@ def build_flux_model(model_config: dict[str, Any]):
     float8_recipe = str(cfg_dict.get("float8_recipe") or "").strip().lower()
     if float8_recipe not in {"", "tensorwise"}:
         raise ValueError(f"Unsupported FLUX float8_recipe={float8_recipe!r}; expected null or 'tensorwise'")
+    mxfp4_recipe = str(cfg_dict.get("mxfp4_recipe") or "").strip().lower()
+    if mxfp4_recipe not in {"", *_MXFP4_RECIPES}:
+        raise ValueError(
+            f"Unsupported FLUX mxfp4_recipe={mxfp4_recipe!r}; expected null, 'pareto_a', or 'pareto_b'"
+        )
+    if float8_recipe and mxfp4_recipe:
+        raise ValueError("FLUX float8_recipe and mxfp4_recipe are mutually exclusive")
     fp8_gemm_backend = str(cfg_dict.get("float8_gemm_backend") or "").strip().lower()
     if fp8_gemm_backend not in {"", "selective_triton", "selective_flydsl"}:
         raise ValueError(
@@ -396,6 +435,58 @@ def build_flux_model(model_config: dict[str, Any]):
             f"{len(full_wgrad_fqns) + len(high_precision_wgrad_fqns)} FLUX block Linear modules; "
             f"wgrad=FP8 for {len(full_wgrad_fqns)} and high precision for "
             f"{len(high_precision_wgrad_fqns)} QKV modules"
+        )
+
+    if mxfp4_recipe:
+        try:
+            from primus_turbo.pytorch.core.backend import (
+                BackendType,
+                GlobalBackendManager,
+                PrecisionType,
+            )
+
+            from omniflow.models.flux.mxfp4 import MXFP4Linear
+        except ImportError as exc:
+            raise ImportError("Primus-Turbo MXFP4 training support is required") from exc
+
+        backend = GlobalBackendManager.get_gemm_backend(PrecisionType.FP4)
+        backend = getattr(backend, "backend", backend)
+        preshuffle = backend == BackendType.AITER and not GlobalBackendManager.auto_tune_enabled()
+        if not preshuffle:
+            raise RuntimeError(
+                "FLUX MXFP4 recipes require PRIMUS_TURBO_GEMM_BACKEND=FP4:AITER "
+                "and PRIMUS_TURBO_AUTO_TUNE=0"
+            )
+
+        precision_counts = {"bf16": 0, "mxfp4": 0, "mxfp8": 0}
+        for fqn, module in list(dit.named_modules()):
+            forward_precision = _mxfp4_forward_precision(fqn, mxfp4_recipe)
+            if forward_precision is None or type(module) is not torch.nn.Linear:
+                continue
+            dit.set_submodule(
+                fqn,
+                MXFP4Linear(module, forward_precision),
+            )
+            precision_counts[forward_precision] += 1
+
+        expected_total = len(dit.double_blocks) * 8 + len(dit.single_blocks) * 2
+        if sum(precision_counts.values()) != expected_total:
+            raise RuntimeError(
+                f"FLUX MXFP4 recipe selected {sum(precision_counts.values())} block Linear modules; "
+                f"expected {expected_total}"
+            )
+        if len(dit.double_blocks) == 19 and len(dit.single_blocks) == 38:
+            expected_counts = {
+                "pareto_a": {"bf16": 76, "mxfp4": 0, "mxfp8": 152},
+                "pareto_b": {"bf16": 19, "mxfp4": 38, "mxfp8": 171},
+            }[mxfp4_recipe]
+            if precision_counts != expected_counts:
+                raise RuntimeError(
+                    f"FLUX MXFP4 {mxfp4_recipe} routed {precision_counts}; expected {expected_counts}"
+                )
+        logger.info(
+            f"Enabled FLUX MXFP4 {mxfp4_recipe}: forward={precision_counts}; "
+            "backward=MXFP4 for all selected modules"
         )
 
     encoder_cfg = dict(model_config.get("encoder", {}) or cfg_dict.get("encoder", {}) or {})

@@ -1,0 +1,37 @@
+FROM zirui3/primus-v26.3-flux:v0.4
+
+ARG PRIMUS_TURBO_REVISION=220ead50861860f47161787694319f4b0853df3a
+
+RUN git clone --recursive https://github.com/AMD-AGI/Primus-Turbo.git /tmp/Primus-Turbo && \
+    git -C /tmp/Primus-Turbo checkout "${PRIMUS_TURBO_REVISION}" && \
+    git -C /tmp/Primus-Turbo submodule update --init --recursive && \
+    /opt/venv/bin/python - <<'PY'
+from pathlib import Path
+
+path = Path("/tmp/Primus-Turbo/csrc/kernels/quantization/quantization_mxfp4.cu")
+source = path.read_text()
+old = "int val_to_add     = 1 << (hp_mbits - mbits - 1);"
+new = "int val_to_add     = 3 << (hp_mbits - mbits - 3);"
+if source.count(old) != 1:
+    raise RuntimeError(f"Expected one MXFP4 scale expression, found {source.count(old)}")
+path.write_text(source.replace(old, new))
+PY
+RUN GPU_ARCHS=gfx950 \
+    ROCSHMEM_HOME=/tmp/rocshmem-not-installed \
+    /opt/venv/bin/python -m pip install --no-build-isolation --no-deps --force-reinstall /tmp/Primus-Turbo && \
+    rm -rf /tmp/Primus-Turbo
+
+RUN /opt/venv/bin/python - <<'PY'
+import torch
+from primus_turbo.pytorch.kernels.gemm.gemm_fp4_impl import gemm_fp4_impl
+from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
+
+assert gemm_fp4_impl and gemm_fp8_impl
+assert torch.ops.primus_turbo_cpp_extension.quantize_mxfp4_dual
+assert torch.ops.primus_turbo_cpp_extension.quantize_mxfp8
+PY
+
+LABEL com.amd.primus.mxfp4-scale-policy="uos_7p25"
+LABEL com.amd.primus-turbo.revision="${PRIMUS_TURBO_REVISION}"
+
+CMD ["/usr/bin/bash"]
