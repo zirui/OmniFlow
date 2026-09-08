@@ -18,12 +18,29 @@ def main() -> None:
 
     torch.manual_seed(0)
     set_attention_backend("flash_attn_aiter")
+    mxfp4_recipe = os.environ.get("FLUX_MXFP4_RECIPE", "")
+    float8_recipe = os.environ.get("FLUX_FLOAT8_RECIPE", "")
+    if not mxfp4_recipe and not float8_recipe:
+        float8_recipe = "tensorwise"
     model = build_flux_model(
         {
             "model_preset": "flux.1-schnell",
             "config": {
-                "float8_recipe": "tensorwise",
-                "float8_gemm_backend": os.environ.get("FLUX_FP8_GEMM_BACKEND", "selective_flydsl"),
+                "float8_recipe": float8_recipe,
+                "float8_gemm_backend": os.environ.get("FLUX_FP8_GEMM_BACKEND", ""),
+                "mxfp4_recipe": mxfp4_recipe,
+                "mxfp4_forward_precision": os.environ.get("FLUX_MXFP4_FORWARD_PRECISION", "mxfp4"),
+                "mxfp4_forward_hadamard": os.environ.get("FLUX_MXFP4_FORWARD_HADAMARD", "none"),
+                "mxfp4_bf16_forward_scope": os.environ.get("FLUX_MXFP4_BF16_FORWARD_SCOPE", "none"),
+                "mxfp4_selective_forward_scope": os.environ.get(
+                    "FLUX_MXFP4_SELECTIVE_FORWARD_SCOPE", "none"
+                ),
+                "mxfp4_activation_residual": os.environ.get("FLUX_MXFP4_ACTIVATION_RESIDUAL", "none"),
+                "mxfp4_activation_residual_dtype": os.environ.get(
+                    "FLUX_MXFP4_ACTIVATION_RESIDUAL_DTYPE", "bf16"
+                ),
+                "mxfp4_eval_precision": os.environ.get("FLUX_MXFP4_EVAL_PRECISION", "same"),
+                "mxfp4_gradient_stochastic_rounding": os.environ.get("FLUX_MXFP4_GRADIENT_SR", "false"),
             },
         }
     )

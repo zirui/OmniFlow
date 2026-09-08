@@ -118,10 +118,44 @@ FLUX_CONFIG=config_4n_gbs1024.sh \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
+MXFP4 caches must be built with the MXFP4 image and exact recipe. Pareto A,
+Pareto B, custom recipes, and tensorwise FP8 have different graphs and cannot
+share archives. For example, prewarm Pareto A with:
+
+```bash
+DOCKER_IMAGE=zirui3/primus-v26.3-flux:v0.4-mxfp4-uos
+docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
+  --ipc=host --shm-size=20G \
+  -e HIP_VISIBLE_DEVICES=0 -e PYTHONPATH=/workspace/OmniFlow/src \
+  -e TORCHINDUCTOR_CACHE_DIR="$CACHE_DIR" \
+  -e FLUX_FLOAT8_RECIPE= -e FLUX_MXFP4_RECIPE=pareto_a \
+  -e FLUX_MXFP4_EVAL_PRECISION=bf16 \
+  -e PRIMUS_TURBO_GEMM_BACKEND=FP4:AITER -e PRIMUS_TURBO_AUTO_TUNE=0 \
+  -v "$REPO:/workspace/OmniFlow" -v /shared_nfs:/shared_nfs \
+  -w /workspace/OmniFlow "$DOCKER_IMAGE" \
+  python examples/mlperf/flux1/prewarm_inductor_cache.py
+```
+
 On homogeneous MI355X nodes, a verified archive may be copied to another node
 rank. Never let multiple ranks write one shared cache. Rebuild the cache when
-the image, PyTorch/Triton/FlyDSL versions, model graph, batch shapes, or compile
-settings change.
+the image, recipe, PyTorch/Triton/FlyDSL versions, model graph, batch shapes,
+or compile settings change.
+
+## Optimization compatibility
+
+| Optimization | MXFP4 Pareto A/B |
+|---|---|
+| DP32 topology and MI355X scheduling | Inherited from `config_4n_gbs1024.sh` |
+| Qualified Crusoe NCCL settings | Inherited; override `FLUX_NCCL_*` off Crusoe |
+| Cached Inductor max-autotune | Supported with a separate exact cache per recipe |
+| Native FP8 parameter AllGather / PR492 | Not supported by `MXFP4Linear`; requires a new FSDP parameter transport |
+| TorchAO FP8 input/weight reuse and selective FlyDSL | FP8-only; not used by MXFP4 recipes |
+
+The fixed MXFP4 profiles force `FLUX_FP8_ALL_GATHER=0` and keep
+`DP_REPLICATE=4`. Do not substitute the PR492 `v0.4.1` image: the MXFP4 image
+has a separate pinned Primus-Turbo revision and UOS scale policy. A combined
+image or compressed MXFP4 AllGather needs independent correctness and
+performance qualification.
 
 ## Network checks
 
