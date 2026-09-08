@@ -27,7 +27,11 @@ from omniflow.models.flux.math import attention as flux_attention
 from omniflow.models.flux.model import Flux, flux_1_schnell_params
 from omniflow.models.flux.train_pipeline import FluxFlowMatchTrainPipeline
 from omniflow.models.registrations.flux import (
+    _MXFP4_BF16_SCOPES,
+    _MXFP4_RESIDUAL_SCOPES,
+    _MXFP4_SELECTIVE_SCOPES,
     _mxfp4_forward_precision,
+    _resolve_mxfp4_strategy,
     build_flux_model,
 )
 from omniflow.trainers.fsdp2 import FSDP2Trainer
@@ -607,7 +611,7 @@ def test_flux_torchtitan_initialization_is_deterministic_and_zeroes_output():
     second = Flux(params)
     second.init_weights()
 
-    for left, right in zip(first.parameters(), second.parameters()):
+    for left, right in zip(first.parameters(), second.parameters(), strict=True):
         torch.testing.assert_close(left, right)
     assert torch.count_nonzero(first.final_layer.linear.weight) == 0
     assert torch.count_nonzero(first.final_layer.adaLN_modulation[-1].weight) == 0
@@ -625,6 +629,19 @@ def test_flux_rejects_unsupported_or_conflicting_mxfp4_recipe():
     with pytest.raises(ValueError, match="mutually exclusive"):
         build_flux_model(
             {"config": {"float8_recipe": "tensorwise", "mxfp4_recipe": "pareto_a"}}
+        )
+    with pytest.raises(ValueError, match="mxfp4_eval_precision"):
+        build_flux_model(
+            {"config": {"mxfp4_recipe": "custom", "mxfp4_eval_precision": "fp8"}}
+        )
+    with pytest.raises(ValueError, match="mxfp4_gradient_stochastic_rounding"):
+        build_flux_model(
+            {
+                "config": {
+                    "mxfp4_recipe": "custom",
+                    "mxfp4_gradient_stochastic_rounding": "sometimes",
+                }
+            }
         )
 
 
@@ -680,14 +697,158 @@ def test_flux_mxfp4_pareto_recipes_route_exact_modules(recipe, expected):
     assert _mxfp4_forward_precision("final_layer.linear", recipe) is None
 
 
+def test_flux_mxfp4_pareto_ignores_irrelevant_custom_settings():
+    assert _resolve_mxfp4_strategy(
+        "double_blocks.0.img_mlp.0",
+        "pareto_a",
+        forward_hadamard="all",
+        activation_residual="all",
+        activation_residual_dtype="not-a-dtype",
+    ) == ("bf16", False, 0)
+
+
+def _all_flux_block_linear_fqns():
+    for index in range(19):
+        for suffix in (
+            "img_attn.qkv",
+            "img_attn.proj",
+            "img_mlp.0",
+            "img_mlp.2",
+            "txt_attn.qkv",
+            "txt_attn.proj",
+            "txt_mlp.0",
+            "txt_mlp.2",
+        ):
+            yield f"double_blocks.{index}.{suffix}"
+    for index in range(38):
+        yield f"single_blocks.{index}.linear1"
+        yield f"single_blocks.{index}.linear2"
+
+
+@pytest.mark.parametrize(
+    ("scope", "count"),
+    [
+        ("none", 0),
+        ("double_img_up_2_3", 2),
+        ("double_img_up", 19),
+        ("double_img_mlp_attn_out", 57),
+        ("double_img_all", 76),
+        ("double_img_all_txt_mlp_down", 95),
+        ("double_img_all_txt_mlp", 114),
+        ("double_all", 152),
+    ],
+)
+def test_flux_mxfp4_custom_bf16_tier_scopes(scope, count):
+    strategies = [
+        _resolve_mxfp4_strategy(
+            fqn, "custom", base_precision="mxfp8", bf16_scope=scope
+        )
+        for fqn in _all_flux_block_linear_fqns()
+    ]
+    assert sum(strategy[0] == "bf16" for strategy in strategies) == count
+
+
+@pytest.mark.parametrize(
+    ("scope", "count"),
+    [
+        ("none", 0),
+        ("single_linear2", 38),
+        ("single_linear1_early", 57),
+        ("late_txt_mlp_up", 48),
+    ],
+)
+def test_flux_mxfp4_custom_selective_tier_scopes(scope, count):
+    strategies = [
+        _resolve_mxfp4_strategy(
+            fqn,
+            "custom",
+            base_precision="mxfp8",
+            selective_mxfp4_scope=scope,
+        )
+        for fqn in _all_flux_block_linear_fqns()
+    ]
+    assert sum(strategy[0] == "mxfp4" for strategy in strategies) == count
+
+
+@pytest.mark.parametrize(
+    ("scope", "count"), [("none", 0), ("mlp", 152), ("all", 228)]
+)
+def test_flux_mxfp4_custom_hadamard_scopes(scope, count):
+    strategies = [
+        _resolve_mxfp4_strategy(fqn, "custom", forward_hadamard=scope)
+        for fqn in _all_flux_block_linear_fqns()
+    ]
+    assert sum(strategy[1] for strategy in strategies) == count
+
+
+def test_flux_mxfp4_custom_composes_precision_hadamard_and_residual_scopes():
+    options = {
+        "base_precision": "mxfp8",
+        "bf16_scope": "double_img_up_2_3",
+        "selective_mxfp4_scope": "late_txt_mlp_up",
+        "forward_hadamard": "all",
+        "activation_residual": "double_txt_up",
+        "activation_residual_dtype": "mxfp4",
+    }
+    assert _resolve_mxfp4_strategy(
+        "double_blocks.2.img_mlp.0", "custom", **options
+    ) == ("bf16", False, 0)
+    assert _resolve_mxfp4_strategy(
+        "double_blocks.9.txt_mlp.0", "custom", **options
+    ) == ("mxfp4", False, 3)
+    assert _resolve_mxfp4_strategy(
+        "single_blocks.0.linear2", "custom", **options
+    ) == ("mxfp4", True, 0)
+    assert _resolve_mxfp4_strategy(
+        "double_blocks.0.txt_attn.qkv", "custom", **options
+    ) == ("mxfp8", False, 0)
+
+
+def test_flux_mxfp4_all_committed_residual_scopes_resolve():
+    expected_counts = {
+        "none": 0,
+        "double_img_up_0_1": 2,
+        "double_img_up_2_3": 2,
+        "double_img_up_0_3": 4,
+        "double_img_up_4_8": 5,
+        "double_img_up_early": 9,
+        "double_img_up_late": 10,
+        "double_img_up": 19,
+        "double_txt_up": 19,
+        "double_up": 38,
+        "up": 76,
+        "mlp": 152,
+        "all": 228,
+    }
+    fqns = list(_all_flux_block_linear_fqns())
+    for scope, count in expected_counts.items():
+        strategies = [
+            _resolve_mxfp4_strategy(fqn, "custom", activation_residual=scope)
+            for fqn in fqns
+        ]
+        assert sum(bool(strategy[2]) for strategy in strategies) == count
+    assert set(_MXFP4_RESIDUAL_SCOPES) | {
+        "double_img_up_early", "double_img_up_late"
+    } == set(expected_counts)
+    assert set(_MXFP4_BF16_SCOPES) == {
+        "none", "double_img_up_2_3", "double_img_up", "double_img_mlp_attn_out",
+        "double_img_all", "double_img_all_txt_mlp_down",
+        "double_img_all_txt_mlp", "double_all",
+    }
+    assert set(_MXFP4_SELECTIVE_SCOPES) == {
+        "none", "single_linear2", "single_linear1_early", "late_txt_mlp_up"
+    }
+
+
 @pytest.mark.parametrize(
     ("recipe", "expected"),
     [
         ("pareto_a", {"bf16": 4, "mxfp4": 0, "mxfp8": 6}),
         ("pareto_b", {"bf16": 1, "mxfp4": 1, "mxfp8": 8}),
+        ("custom", {"bf16": 0, "mxfp4": 10, "mxfp8": 0}),
     ],
 )
-def test_flux_mxfp4_pareto_recipes_replace_only_block_linears(monkeypatch, recipe, expected):
+def test_flux_mxfp4_recipes_replace_only_block_linears(monkeypatch, recipe, expected):
     backend = types.ModuleType("primus_turbo.pytorch.core.backend")
     backend.BackendType = types.SimpleNamespace(AITER="aiter")
     backend.PrecisionType = types.SimpleNamespace(FP4="fp4")
@@ -700,11 +861,12 @@ def test_flux_mxfp4_pareto_recipes_replace_only_block_linears(monkeypatch, recip
     class FakeMXFP4Linear(torch.nn.Module):
         backward_precision = "mxfp4"
 
-        def __init__(self, linear, forward_precision):
+        def __init__(self, linear, forward_precision, **strategy):
             super().__init__()
             self.weight = linear.weight
             self.bias = linear.bias
             self.forward_precision = forward_precision
+            self.strategy = strategy
 
     mxfp4.MXFP4Linear = FakeMXFP4Linear
     monkeypatch.setitem(sys.modules, backend.__name__, backend)
@@ -714,6 +876,8 @@ def test_flux_mxfp4_pareto_recipes_replace_only_block_linears(monkeypatch, recip
         {
             "config": {
                 "mxfp4_recipe": recipe,
+                "mxfp4_eval_precision": "bf16",
+                "mxfp4_gradient_stochastic_rounding": True,
                 "params": {
                     "in_channels": 16,
                     "out_channels": 16,
@@ -734,6 +898,8 @@ def test_flux_mxfp4_pareto_recipes_replace_only_block_linears(monkeypatch, recip
     for module in converted:
         counts[module.forward_precision] += 1
         assert module.backward_precision == "mxfp4"
+        assert module.strategy["eval_bf16"] is True
+        assert module.strategy["gradient_stochastic_rounding"] is True
     assert counts == expected
     assert type(model.dit.img_in) is torch.nn.Linear
     assert type(model.dit.final_layer.linear) is torch.nn.Linear

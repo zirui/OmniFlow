@@ -1019,6 +1019,35 @@ class BaseWanTrainer:
                 payload["time/eta_s"] = eta_seconds
             wandb.log(payload, step=self.global_step)
 
+    def _prepare_mxfp4_forward(self) -> None:
+        """Propagate the step and apply a configured one-time forward healing."""
+        if os.getenv("FLUX_MXFP4_CAPTURE_STEPS"):
+            from omniflow.models.flux.mxfp4 import set_mxfp4_capture_step
+
+            set_mxfp4_capture_step(self.global_step)
+
+        switch_step = int(os.getenv("FLUX_MXFP4_BF16_FORWARD_SWITCH_STEP", "0"))
+        if (
+            switch_step <= 0
+            or self.global_step < switch_step
+            or getattr(self, "_mxfp4_forward_switched", False)
+        ):
+            return
+        switched = sum(
+            bool(module.switch_forward_to_bf16())
+            for module in self.model.modules()
+            if hasattr(module, "switch_forward_to_bf16")
+        )
+        if not switched:
+            raise RuntimeError("MXFP4 BF16-forward switch found no eligible Linear modules")
+        self._mxfp4_forward_switched = True
+        torch._dynamo.reset()
+        if self.rank == 0:
+            logger.info(
+                f"Switched {switched} MXFP4 Linear modules to BF16 forward at step "
+                f"{self.global_step} (threshold {switch_step})"
+            )
+
     def train(self):
         if self.rank == 0:
             logger.info("Starting training...")
@@ -1069,6 +1098,7 @@ class BaseWanTrainer:
                 self.sampler.set_offset(sample_offset)
 
             for batch_idx, batch in enumerate(self.dataloader):
+                self._prepare_mxfp4_forward()
                 if self.rank == 0 and self.global_step == 0 and batch_idx == 0:
                     logger.info("First training batch loaded; entering forward pass")
                 if self.mlperf_enabled and not mlperf_train_started:

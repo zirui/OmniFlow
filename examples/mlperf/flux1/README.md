@@ -53,6 +53,7 @@ batch size:
 | `config_4n_gbs1024.sh` | 4 | 32 | 1 | 1024 |
 | `config_4n_gbs1024_mxfp4_pareto_a.sh` | 4 | 32 | 1 | 1024 |
 | `config_4n_gbs1024_mxfp4_pareto_b.sh` | 4 | 32 | 1 | 1024 |
+| `config_4n_gbs1024_mxfp4_custom.sh` | 4 | 32 | 1 | 1024 |
 
 Run inside a matching Slurm allocation:
 
@@ -63,13 +64,61 @@ FLUX_CONFIG=config_2n_gbs1024.sh \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
-The MXFP4 profiles expose only the accepted recipes:
+The qualified `pareto_a` and `pareto_b` recipes remain fixed: `pareto_a` has
+76 BF16 and 152 MXFP8 forward linears; `pareto_b` has 19 BF16, 38 MXFP4, and
+171 MXFP8 forward linears. The `custom` recipe is an experimental composition
+surface. All three keep MXFP4 backward on all 228 selected block linears and
+require the pinned image and AITER preshuffle backend.
 
-- `pareto_a`: 76 BF16 and 152 MXFP8 forward linears.
-- `pareto_b`: 19 BF16, 38 MXFP4, and 171 MXFP8 forward linears.
+### Custom MXFP4 options
 
-Both route all 228 selected block-linear backward paths through MXFP4. They
-require the pinned MXFP4 image and set the required AITER preshuffle backend.
+| Environment variable | Values |
+|---|---|
+| `FLUX_MXFP4_RECIPE` | `custom` (or fixed `pareto_a` / `pareto_b`) |
+| `FLUX_MXFP4_FORWARD_PRECISION` | `bf16`, `mxfp8`, `mxfp4` |
+| `FLUX_MXFP4_BF16_FORWARD_SCOPE` | `none`, `double_img_up_2_3`, `double_img_up`, `double_img_mlp_attn_out`, `double_img_all`, `double_img_all_txt_mlp_down`, `double_img_all_txt_mlp`, `double_all` |
+| `FLUX_MXFP4_SELECTIVE_FORWARD_SCOPE` | `none`, `single_linear2`, `single_linear1_early`, `late_txt_mlp_up` |
+| `FLUX_MXFP4_FORWARD_HADAMARD` | `none`, `mlp`, `all` |
+| `FLUX_MXFP4_ACTIVATION_RESIDUAL` | `none`, `double_img_up_0_1`, `double_img_up_2_3`, `double_img_up_0_3`, `double_img_up_4_8`, `double_img_up_early`, `double_img_up_late`, `double_img_up`, `double_txt_up`, `double_up`, `up`, `mlp`, `all` |
+| `FLUX_MXFP4_ACTIVATION_RESIDUAL_DTYPE` | `bf16`, `mxfp8`, `mxfp4` |
+| `FLUX_MXFP4_EVAL_PRECISION` | `same`, `bf16`; Pareto profiles use `bf16` |
+| `FLUX_MXFP4_GRADIENT_SR` | `false`, `true` |
+| `FLUX_MXFP4_CAPTURE_STEPS` | comma-separated optimizer steps |
+| `FLUX_MXFP4_CAPTURE_MODULES` | comma-separated exact module FQNs |
+| `FLUX_MXFP4_CAPTURE_DIR` | capture output directory; defaults to `$OUTPUT_DIR/mxfp4-captures` |
+| `FLUX_MXFP4_BF16_FORWARD_SWITCH_STEP` | positive threshold step, or `0` to disable |
+
+Scope membership for the 19-double/38-single-block model is:
+
+| Override | Scope | Count | Members |
+|---|---|---:|---|
+| BF16 | `double_img_up_2_3` | 2 | image MLP-up in double blocks 2–3 |
+| BF16 | `double_img_up` | 19 | all image MLP-up |
+| BF16 | `double_img_mlp_attn_out` | 57 | image MLP up/down and attention output |
+| BF16 | `double_img_all` | 76 | previous image modules plus image QKV |
+| BF16 | `double_img_all_txt_mlp_down` | 95 | previous 76 plus text MLP-down |
+| BF16 | `double_img_all_txt_mlp` | 114 | previous 95 plus text MLP-up |
+| BF16 | `double_all` | 152 | every double-block Linear |
+| MXFP4 | `single_linear2` | 38 | every single-block `linear2` |
+| MXFP4 | `single_linear1_early` | 57 | previous 38 plus `linear1` in single blocks 0–18 |
+| MXFP4 | `late_txt_mlp_up` | 48 | base 38 `linear2` plus text MLP-up in double blocks 9–18 |
+
+The selective MXFP4 names are cumulative as shown: both larger scopes include
+all 38 `single_linear2` members, then add their named tier.
+
+Precision resolution is deterministic: the BF16 scope wins, then the selective
+MXFP4 scope, then the base precision. Hadamard and residual correction only run
+on modules resolved to MXFP4. On overlap residual wins over Hadamard; disjoint
+selections combine. Hadamard applies the same rowwise RHT to activation and
+weight. Residual correction computes `input - dequant(Q4(input))`; its MXFP4
+mode reuses the forward FP4 weight. `bf16` evaluation bypasses low-precision
+forward without changing the training strategy. Healing changes eligible
+MXFP4-forward wrappers to BF16 once on the first forward at or after the
+configured threshold (including resumed runs) and leaves backward unchanged.
+
+Captures are deduplicated by step and FQN and saved only on rank zero. Analyze
+them with `tools/mxfp4_real_tensor_gate.py` or
+`tools/mxfp4_residual_decomposition.py` (both provide `--help`).
 
 For a one-step smoke test:
 

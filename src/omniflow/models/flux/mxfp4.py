@@ -3,6 +3,8 @@
 
 """Compile-friendly Primus-Turbo MXFP4 linear kernels for FLUX."""
 
+import os
+
 import torch
 from primus_turbo.pytorch.core.backend import BackendType
 from primus_turbo.pytorch.core.low_precision import ScalingGranularity
@@ -144,12 +146,37 @@ _quantize_mxfp8_rowwise.register_autograd(
 )
 
 
-def _quantize_input(input_2d: torch.Tensor, preshuffle: bool):
+@torch.library.custom_op("omniflow::dequantize_mxfp4_rowwise", mutates_args=(), device_types="cuda")
+def _dequantize_mxfp4_rowwise(
+    x: torch.Tensor, scale: torch.Tensor, out_dtype: torch.dtype
+) -> torch.Tensor:
+    return torch.ops.primus_turbo_cpp_extension.dequantize_mxfp4(
+        x, scale, 1, _MXFP4_BLOCK_SIZE, out_dtype
+    )
+
+
+@_dequantize_mxfp4_rowwise.register_fake
+def _dequantize_mxfp4_rowwise_fake(
+    x: torch.Tensor, scale: torch.Tensor, out_dtype: torch.dtype
+) -> torch.Tensor:
+    del scale
+    return torch.empty(x.shape[0], x.shape[1] * 2, dtype=out_dtype, device=x.device)
+
+
+_dequantize_mxfp4_rowwise.register_autograd(
+    lambda ctx, *grads: (None, None, None),
+    setup_context=lambda ctx, inputs, output: None,
+)
+
+
+def _quantize_input(
+    input_2d: torch.Tensor, preshuffle: bool, forward_rht: bool = False
+):
     return _quantize_mxfp4_dual(
         input_2d,
         False,
         False,
-        False,
+        forward_rht,
         False,
         False,
         True,
@@ -160,12 +187,14 @@ def _quantize_input(input_2d: torch.Tensor, preshuffle: bool):
     )
 
 
-def _quantize_weight(weight: torch.Tensor, preshuffle: bool):
+def _quantize_weight(
+    weight: torch.Tensor, preshuffle: bool, forward_rht: bool = False
+):
     return _quantize_mxfp4_dual(
         weight,
         True,
         False,
-        False,
+        forward_rht,
         True,
         False,
         False,
@@ -210,11 +239,49 @@ def _gemm_fp4(a, a_scale, trans_a, b, b_scale, trans_b, out_dtype, preshuffle):
 
 class _MXFP4Forward(torch.autograd.Function):
     @staticmethod
-    def forward(input, weight, preshuffle, use_gradient_sr):
+    def forward(
+        input,
+        weight,
+        preshuffle,
+        use_gradient_sr,
+        use_forward_rht,
+        activation_residual_mode,
+    ):
         input_2d = input.reshape(-1, input.shape[-1])
-        a, a_scale, a_t, a_t_scale = _quantize_input(input_2d, preshuffle)
-        b, b_scale, b_t, b_t_scale = _quantize_weight(weight, preshuffle)
+        a, a_scale, a_t, a_t_scale = _quantize_input(
+            input_2d, preshuffle, use_forward_rht
+        )
+        b, b_scale, b_t, b_t_scale = _quantize_weight(
+            weight, preshuffle, use_forward_rht
+        )
         output = _gemm_fp4(a, a_scale, False, b, b_scale, True, input.dtype, preshuffle)
+        if activation_residual_mode:
+            q_input, q_scale, _, _ = _quantize_input(input_2d, False)
+            q_input = _dequantize_mxfp4_rowwise(q_input, q_scale, input.dtype)
+            residual = input_2d - q_input
+            if activation_residual_mode == 1:
+                correction = torch.nn.functional.linear(residual, weight)
+            elif activation_residual_mode == 2:
+                r, r_scale = _quantize_mxfp8_rowwise(residual, False)
+                w, w_scale = _quantize_mxfp8_rowwise(weight, True)
+                correction = gemm_fp8_impl(
+                    r,
+                    r_scale,
+                    False,
+                    w,
+                    w_scale,
+                    True,
+                    input.dtype,
+                    False,
+                    granularity=_GRANULARITY,
+                    default_backend=BackendType.FLYDSL.value,
+                )
+            else:
+                r, r_scale, _, _ = _quantize_input(residual, preshuffle)
+                correction = _gemm_fp4(
+                    r, r_scale, False, b, b_scale, True, input.dtype, preshuffle
+                )
+            output = output + correction
         return (
             output,
             a_t.view(torch.uint8),
@@ -225,7 +292,7 @@ class _MXFP4Forward(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        input, _, preshuffle, use_gradient_sr = inputs
+        input, _, preshuffle, use_gradient_sr, _, _ = inputs
         ctx.preshuffle = preshuffle
         ctx.use_gradient_sr = use_gradient_sr
         ctx.out_dtype = input.dtype
@@ -254,7 +321,7 @@ class _MXFP4Forward(torch.autograd.Function):
         grad_weight = _gemm_fp4(
             g_t, g_t_scale, False, a_t, a_t_scale, True, ctx.out_dtype, ctx.preshuffle
         )
-        return grad_input, grad_weight, None, None
+        return grad_input, grad_weight, None, None, None, None
 
 
 def _mxfp4_backward(ctx, grad_output, input, weight):
@@ -338,25 +405,126 @@ _FORWARD_FUNCTIONS = {
     "mxfp8": _MXFP8Forward,
 }
 
+_MXFP4_CAPTURE_STEP = -1
+_MXFP4_CAPTURED: set[tuple[int, str]] = set()
+
+
+def set_mxfp4_capture_step(step: int) -> None:
+    """Set the optimizer step associated with subsequent forward captures."""
+    global _MXFP4_CAPTURE_STEP
+    _MXFP4_CAPTURE_STEP = step
+
+
+def _save_mxfp4_capture(input: torch.Tensor, weight: torch.Tensor, module_name: str) -> None:
+    steps = {
+        int(value)
+        for value in os.getenv("FLUX_MXFP4_CAPTURE_STEPS", "").split(",")
+        if value
+    }
+    key = (_MXFP4_CAPTURE_STEP, module_name)
+    if _MXFP4_CAPTURE_STEP not in steps or key in _MXFP4_CAPTURED:
+        return
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        output_dir = os.environ["FLUX_MXFP4_CAPTURE_DIR"]
+        os.makedirs(output_dir, exist_ok=True)
+        torch.save(
+            {
+                "step": _MXFP4_CAPTURE_STEP,
+                "module": module_name,
+                "input": input.reshape(-1, input.shape[-1])[:1024].detach().cpu(),
+                "weight": weight.detach().cpu(),
+            },
+            os.path.join(
+                output_dir,
+                f"step{_MXFP4_CAPTURE_STEP}_{module_name.replace('.', '_')}.pt",
+            ),
+        )
+    _MXFP4_CAPTURED.add(key)
+
+
+@torch.library.custom_op("omniflow::capture_mxfp4_linear", mutates_args=(), device_types="cuda")
+def _capture_mxfp4_linear(
+    input: torch.Tensor, weight: torch.Tensor, module_name: str
+) -> torch.Tensor:
+    _save_mxfp4_capture(input, weight, module_name)
+    return input.clone()
+
+
+@_capture_mxfp4_linear.register_fake
+def _capture_mxfp4_linear_fake(
+    input: torch.Tensor, weight: torch.Tensor, module_name: str
+) -> torch.Tensor:
+    del weight, module_name
+    return torch.empty_like(input)
+
+
+_capture_mxfp4_linear.register_autograd(
+    lambda ctx, grad: (grad, None, None),
+    setup_context=lambda ctx, inputs, output: None,
+)
+
 
 class MXFP4Linear(torch.nn.Module):
     """Linear with recipe-selected forward precision and MXFP4 backward."""
 
     backward_precision = "mxfp4"
 
-    def __init__(self, linear: torch.nn.Linear, forward_precision: str) -> None:
+    def __init__(
+        self,
+        linear: torch.nn.Linear,
+        forward_precision: str,
+        *,
+        forward_hadamard: bool = False,
+        activation_residual_mode: int = 0,
+        eval_bf16: bool = False,
+        gradient_stochastic_rounding: bool = False,
+        fqn: str = "",
+    ) -> None:
         super().__init__()
         self.in_features = linear.in_features
         self.out_features = linear.out_features
         self.weight = linear.weight
         self.bias = linear.bias
         self.forward_precision = forward_precision
-        self._function = _FORWARD_FUNCTIONS[forward_precision]
+        self.forward_hadamard = forward_hadamard
+        self.activation_residual_mode = activation_residual_mode
+        self.eval_bf16 = eval_bf16
+        self.gradient_stochastic_rounding = gradient_stochastic_rounding
+        capture_modules = set(
+            filter(None, os.getenv("FLUX_MXFP4_CAPTURE_MODULES", "").split(","))
+        )
+        self._capture_name = fqn if fqn in capture_modules else ""
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if self.eval_bf16 and not self.training:
+            return torch.nn.functional.linear(input, self.weight, self.bias)
         shape = input.shape[:-1]
-        result = self._function.apply(input, self.weight, True, False)
-        output = result[0] if self.forward_precision == "mxfp4" else result
+        if self._capture_name:
+            input = _capture_mxfp4_linear(input, self.weight, self._capture_name)
+        function = _FORWARD_FUNCTIONS[self.forward_precision]
+        if self.forward_precision == "mxfp4":
+            result = function.apply(
+                input,
+                self.weight,
+                True,
+                self.gradient_stochastic_rounding,
+                self.forward_hadamard,
+                self.activation_residual_mode,
+            )
+            output = result[0]
+        else:
+            output = function.apply(
+                input, self.weight, True, self.gradient_stochastic_rounding
+            )
         if self.bias is not None:
             output = output + self.bias
         return output.reshape(*shape, self.out_features)
+
+    def switch_forward_to_bf16(self) -> bool:
+        """Heal an MXFP4 forward while preserving its MXFP4 backward."""
+        if self.forward_precision != "mxfp4":
+            return False
+        self.forward_precision = "bf16"
+        self.forward_hadamard = False
+        self.activation_residual_mode = 0
+        return True
