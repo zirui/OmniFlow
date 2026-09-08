@@ -128,7 +128,8 @@ settings change.
 For multi-node runs, verify that the ABI-4 libionic mount and
 `/dev/infiniband` exist. With `NCCL_DEBUG=INFO`, confirm that channels use
 `NET/RCCL-ANP/.../GDRDMA`. Set `NCCL_IB_DISABLE=1` only for a host-staged
-comparison.
+comparison. DCCS runs should set `FLUX_NCCL_DMABUF_ENABLE=0`,
+`NCCL_SOCKET_IFNAME=fenic`, and `GLOO_SOCKET_IFNAME=fenic`.
 
 Common failures:
 
