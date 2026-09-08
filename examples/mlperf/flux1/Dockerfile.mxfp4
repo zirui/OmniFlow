@@ -26,11 +26,12 @@ RUN GPU_ARCHS=gfx950 \
     rm -rf /tmp/Primus-Turbo
 
 RUN /opt/venv/bin/python - <<'PY'
-import torch
-from primus_turbo.pytorch.kernels.gemm.gemm_fp4_impl import gemm_fp4_impl
-from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
+from pathlib import Path
 
-assert gemm_fp4_impl and gemm_fp8_impl
+import torch
+
+extension = next(Path("/opt/venv/lib/python3.12/site-packages/primus_turbo/pytorch").glob("_C*.so"))
+torch.ops.load_library(str(extension))
 assert torch.ops.primus_turbo_cpp_extension.quantize_mxfp4_dual
 assert torch.ops.primus_turbo_cpp_extension.quantize_mxfp4
 assert torch.ops.primus_turbo_cpp_extension.quantize_mxfp8
