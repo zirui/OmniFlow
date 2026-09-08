@@ -30,6 +30,184 @@ def _load_mxfp4(monkeypatch):
     return importlib.import_module("omniflow.models.flux.mxfp4")
 
 
+def test_mxfp4_quantizer_custom_ops_have_compile_schemas_and_fake_shapes(monkeypatch):
+    mxfp4 = _load_mxfp4(monkeypatch)
+
+    assert str(mxfp4._quantize_mxfp4_colwise._schema) == (
+        "(Tensor x, bool use_2d_block, bool use_rht, bool shuffle_scale, bool shuffle) -> (Tensor, Tensor)"
+    )
+    assert str(mxfp4._quantize_mxfp8_rowwise_mxfp4_colwise._schema) == (
+        "(Tensor x, bool rowwise_fp8_use_2d_block, bool colwise_fp4_use_2d_block, "
+        "bool colwise_fp4_use_rht, bool shuffle_colwise_scale, bool shuffle_colwise) "
+        "-> (Tensor, Tensor, Tensor, Tensor)"
+    )
+
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    with FakeTensorMode():
+        x = torch.empty(96, 160, device="cuda")
+        mixed = mxfp4._quantize_mxfp8_rowwise_mxfp4_colwise(x, False, True, True, True, True)
+        assert [(tuple(t.shape), t.dtype) for t in mixed] == [
+            ((96, 256), torch.float8_e4m3fn),
+            ((96, 8), torch.float8_e8m0fnu),
+            ((160, 64), torch.float4_e2m1fn_x2),
+            ((256, 8), torch.float8_e8m0fnu),
+        ]
+        colwise = mxfp4._quantize_mxfp4_colwise(x, False, True, False, False)
+        assert [(tuple(t.shape), t.dtype) for t in colwise] == [
+            ((160, 64), torch.float4_e2m1fn_x2),
+            ((160, 4), torch.float8_e8m0fnu),
+        ]
+
+
+def test_mxfp4_quantizer_wrappers_call_raw_ops_and_have_nondifferentiable_autograd(
+    monkeypatch,
+):
+    mxfp4 = _load_mxfp4(monkeypatch)
+    x = torch.ones(2, 32)
+    calls = []
+
+    def raw_colwise(*args):
+        calls.append(("colwise", args))
+        return (x, x)
+
+    def raw_mixed(*args):
+        calls.append(("mixed", args))
+        return (x, x, x, x)
+
+    monkeypatch.setattr(
+        torch.ops.primus_turbo_cpp_extension,
+        "quantize_mxfp4",
+        raw_colwise,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        torch.ops.primus_turbo_cpp_extension,
+        "quantize_mxfp8_rowwise_mxfp4_colwise",
+        raw_mixed,
+        raising=False,
+    )
+
+    mxfp4._quantize_mxfp4_colwise._init_fn(x, True, False, True, True)
+    mxfp4._quantize_mxfp8_rowwise_mxfp4_colwise._init_fn(x, False, True, False, True, True)
+
+    assert calls[0][0] == "colwise"
+    assert calls[0][1][1:] == (
+        torch.float4_e2m1fn_x2,
+        0,
+        128,
+        True,
+        False,
+        False,
+        True,
+        True,
+    )
+    assert calls[1] == ("mixed", (x, False, True, False, True, True))
+    assert mxfp4._quantize_mxfp4_colwise._backward_fn(None, None, None) == (None,) * 5
+    assert mxfp4._quantize_mxfp8_rowwise_mxfp4_colwise._backward_fn(None, None, None, None, None) == (None,) * 6
+
+
+def test_mxfp8_forward_saves_fused_colwise_outputs_for_backward(monkeypatch):
+    mxfp4 = _load_mxfp4(monkeypatch)
+    input = torch.randn(2, 4, requires_grad=True)
+    weight = torch.randn(3, 4, requires_grad=True)
+    calls = []
+
+    def fused(value, *options):
+        calls.append(options)
+        colwise = torch.zeros(value.shape[1], 64, dtype=torch.uint8).view(torch.float4_e2m1fn_x2)
+        scale = torch.zeros(value.shape[1], 4, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+        return value, torch.empty(0), colwise, scale
+
+    saved = []
+
+    def backward(ctx, grad_output, *quantized):
+        saved.extend(quantized)
+        return torch.zeros(ctx.orig_shape), torch.zeros(3, 4)
+
+    monkeypatch.setattr(mxfp4, "_quantize_mxfp8_rowwise_mxfp4_colwise", fused)
+    monkeypatch.setattr(mxfp4, "_mxfp4_backward", backward)
+    monkeypatch.setattr(
+        mxfp4,
+        "gemm_fp8_impl",
+        lambda a, a_scale, trans_a, b, b_scale, trans_b, *args, **kwargs: a @ b.T,
+    )
+    monkeypatch.setattr(
+        mxfp4,
+        "_quantize_mxfp8_rowwise",
+        lambda *args: pytest.fail("separate MXFP8 quantization must not run"),
+    )
+    monkeypatch.setattr(
+        mxfp4,
+        "_quantize_mxfp4_dual",
+        lambda *args: pytest.fail("MXFP8 backward must not requantize BF16 tensors"),
+    )
+
+    packed = []
+    with torch.autograd.graph.saved_tensors_hooks(
+        lambda tensor: packed.append(tensor.dtype) or tensor,
+        lambda tensor: tensor,
+    ):
+        output = mxfp4._MXFP8Forward.apply(input, weight, True, False)[0]
+        output.sum().backward()
+
+    assert packed == [
+        torch.float4_e2m1fn_x2,
+        torch.float8_e8m0fnu,
+        torch.float4_e2m1fn_x2,
+        torch.float8_e8m0fnu,
+    ]
+    assert calls == [
+        (False, False, True, True, True),
+        (True, True, False, True, True),
+    ]
+    assert [tensor.dtype for tensor in saved] == [
+        torch.float4_e2m1fn_x2,
+        torch.float8_e8m0fnu,
+        torch.float4_e2m1fn_x2,
+        torch.float8_e8m0fnu,
+    ]
+
+
+def test_bf16_backward_only_quantizes_colwise_mxfp4(monkeypatch):
+    mxfp4 = _load_mxfp4(monkeypatch)
+    input = torch.randn(2, 4, requires_grad=True)
+    weight = torch.randn(3, 4, requires_grad=True)
+    calls = []
+
+    def colwise(value, *options):
+        calls.append((value.shape, options))
+        return value, torch.empty(0)
+
+    monkeypatch.setattr(mxfp4, "_quantize_mxfp4_colwise", colwise)
+    monkeypatch.setattr(
+        mxfp4,
+        "_quantize_mxfp4_dual",
+        lambda *args: pytest.fail("BF16 backward must not request rowwise MXFP4"),
+    )
+    monkeypatch.setattr(
+        mxfp4,
+        "_mxfp4_backward",
+        lambda ctx, grad_output, *quantized: (
+            torch.zeros(ctx.orig_shape),
+            torch.zeros(3, 4),
+        ),
+    )
+
+    packed = []
+    with torch.autograd.graph.saved_tensors_hooks(
+        lambda tensor: packed.append(tensor) or tensor,
+        lambda tensor: tensor,
+    ):
+        mxfp4._BF16Forward.apply(input, weight, True, False).sum().backward()
+
+    assert packed == [input, weight]
+    assert calls == [
+        (torch.Size([2, 4]), (False, True, True, True)),
+        (torch.Size([3, 4]), (True, False, True, True)),
+    ]
+
+
 def test_mxfp4_paired_forward_hadamard_only_changes_rowwise_quantization(monkeypatch):
     mxfp4 = _load_mxfp4(monkeypatch)
     calls = []
@@ -187,6 +365,20 @@ def test_mxfp4_eval_bf16_bypasses_strategy_and_gradient_sr_reaches_training(monk
     calls.clear()
     torch.testing.assert_close(module(input), torch.nn.functional.linear(input, linear.weight, linear.bias))
     assert calls == []
+
+
+@pytest.mark.parametrize("profile", ["pareto_a", "pareto_b", "custom"])
+def test_mxfp4_profiles_use_mixed_quant_image(profile):
+    env = os.environ.copy()
+    env.pop("DOCKER_IMAGE", None)
+    command = (
+        f"source examples/mlperf/flux1/config_4n_gbs1024_mxfp4_{profile}.sh; "
+        'printf "%s" "$DOCKER_IMAGE"'
+    )
+    result = subprocess.run(
+        ["bash", "-c", command], check=True, capture_output=True, text=True, env=env
+    )
+    assert result.stdout == "zirui3/primus-v26.3-flux:v0.4-mxfp4-mixed-quant-uos"
 
 
 @pytest.mark.parametrize("profile", ["pareto_a", "pareto_b"])

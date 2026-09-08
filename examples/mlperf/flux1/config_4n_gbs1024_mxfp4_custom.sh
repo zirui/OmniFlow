@@ -16,7 +16,7 @@ _auto_tune=${PRIMUS_TURBO_AUTO_TUNE:-0}
 
 source "$(dirname -- "${BASH_SOURCE[0]}")/config_4n_gbs1024.sh"
 
-export DOCKER_IMAGE=${DOCKER_IMAGE:-zirui3/primus-v26.3-flux:v0.4-mxfp4-uos}
+export DOCKER_IMAGE=${DOCKER_IMAGE:-zirui3/primus-v26.3-flux:v0.4-mxfp4-mixed-quant-uos}
 export FLUX_FLOAT8_RECIPE=$_float8_recipe
 export FLUX_FP8_GEMM_BACKEND=$_fp8_backend
 export FLUX_MXFP4_RECIPE=$_mxfp4_recipe

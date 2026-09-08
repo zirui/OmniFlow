@@ -1,0 +1,560 @@
+From a58e3d9e1ea9602ebf2f3d4553d8e6bffaa21030 Mon Sep 17 00:00:00 2001
+From: "zirui.zhang" <zirui.zhang@amd.com>
+Date: Tue, 8 Sep 2026 16:03:15 +0000
+Subject: [PATCH] Add fused MXFP8 row MXFP4 column quantization
+
+---
+ csrc/include/primus_turbo/quantization.h      |   8 +
+ .../quantization/quantization_mxfp4.cu        | 190 +++++++++++++++---
+ csrc/pytorch/bindings_pytorch.cpp             |   6 +
+ csrc/pytorch/extensions.h                     |  10 +
+ csrc/pytorch/quantization/quantization.cpp    |  67 ++++++
+ .../quantization/quantization_meta.cpp        |  38 ++++
+ tests/pytorch/ops/test_quantization.py        |  82 ++++++++
+ 7 files changed, 374 insertions(+), 27 deletions(-)
+
+diff --git a/csrc/include/primus_turbo/quantization.h b/csrc/include/primus_turbo/quantization.h
+index 4e9ff5ce..6d72ddb5 100644
+--- a/csrc/include/primus_turbo/quantization.h
++++ b/csrc/include/primus_turbo/quantization.h
+@@ -133,6 +133,14 @@ void quantize_mxfp4_dual_impl(const DType *input, dtype::float4x2_e2m1 *rowwise_
+                               int colwise_scale_N_pad, detail::ScalingRecipe rowwise_recipe,
+                               detail::ScalingRecipe colwise_recipe, hipStream_t stream);
+ 
++template <typename DType>
++void quantize_mxfp8_rowwise_mxfp4_colwise_impl(
++    const DType *input, dtype::float8_e4m3 *rowwise_output, uint8_t *rowwise_scale,
++    dtype::float4x2_e2m1 *colwise_output, uint8_t *colwise_scale, int M, int N, int M_pad,
++    int N_pad, int rowwise_scale_stride, int colwise_scale_stride, int rowwise_scale_N,
++    int colwise_scale_N, int colwise_scale_M_pad, int colwise_scale_N_pad,
++    detail::ScalingRecipe rowwise_recipe, detail::ScalingRecipe colwise_recipe, hipStream_t stream);
++
+ template <typename DType>
+ void quantize_mxfp4_impl(const DType *input, dtype::float4x2_e2m1 *output, uint8_t *scale,
+                          detail::QuantizeMode mode, int G, int M, int N, int M_pad, int N_pad,
+diff --git a/csrc/kernels/quantization/quantization_mxfp4.cu b/csrc/kernels/quantization/quantization_mxfp4.cu
+index 67c25928..a6694d48 100644
+--- a/csrc/kernels/quantization/quantization_mxfp4.cu
++++ b/csrc/kernels/quantization/quantization_mxfp4.cu
+@@ -180,6 +180,55 @@ __device__ __forceinline__ void compute_tile_scale(float r_amax, float &r_scale_
+     r_scale_native = uint_as_float((uint32_t) scale_e8m0_biased << hp_mbits);
+ }
+ 
++__device__ __forceinline__ void compute_mxfp8_e4m3_tile_scale(float r_amax, float &r_scale_native,
++                                                              uint8_t &r_scale_e8m0) {
++    constexpr int  hp_mbits           = FP32_MANTISSA_BITS;
++    constexpr int  hp_ebits           = FP32_EXPONENT_BITS;
++    constexpr int  hp_exp_bias        = FP32_EXPONENT_EXP_BIAS;
++    constexpr int  e8m0_exponent_bias = E8M0_EXPONENT_BIAS;
++    constexpr int  val_to_add         = 1 << (hp_mbits - FP8E4M3_MANTISSA_BITS - 1);
++    constexpr int  hp_exp_mask        = (1 << (hp_ebits + 1)) - 1;
++    const uint32_t amax_bits          = float_as_uint(r_amax);
++    int scale_e8m0_unbiased = (((amax_bits + val_to_add) >> hp_mbits) & hp_exp_mask) - hp_exp_bias -
++                              FP8E4M3_TARGET_MAX_POW2;
++    scale_e8m0_unbiased =
++        scale_e8m0_unbiased > -e8m0_exponent_bias ? scale_e8m0_unbiased : -e8m0_exponent_bias;
++    scale_e8m0_unbiased = scale_e8m0_unbiased < (e8m0_exponent_bias + 1) ? scale_e8m0_unbiased
++                                                                         : (e8m0_exponent_bias + 1);
++    const int scale_e8m0_biased = scale_e8m0_unbiased + e8m0_exponent_bias;
++    r_scale_e8m0                = static_cast<uint8_t>(scale_e8m0_biased);
++    r_scale_native = uint_as_float(static_cast<uint32_t>(scale_e8m0_biased) << hp_mbits);
++}
++
++__device__ __forceinline__ uint32_t cvt_f32x4_to_fp8e4m3x4(float v0, float v1, float v2, float v3,
++                                                           float scale) {
++    const float lim = FP8E4M3_MAX * scale;
++    v0              = fminf(fmaxf(v0, -lim), lim);
++    v1              = fminf(fmaxf(v1, -lim), lim);
++    v2              = fminf(fmaxf(v2, -lim), lim);
++    v3              = fminf(fmaxf(v3, -lim), lim);
++#if defined(__gfx950__)
++    uint16_t low = 0;
++    asm volatile("v_cvt_scalef32_pk_fp8_f32 %0, %1, %2, %3"
++                 : "+v"(low)
++                 : "v"(v0), "v"(v1), "v"(scale));
++    uint16_t high = 0;
++    asm volatile("v_cvt_scalef32_pk_fp8_f32 %0, %1, %2, %3"
++                 : "+v"(high)
++                 : "v"(v2), "v"(v3), "v"(scale));
++    return (static_cast<uint32_t>(high) << 16) | low;
++#elif defined(__gfx1250__)
++    typedef float     float32x8_t __attribute__((ext_vector_type(8)));
++    typedef uint32_t  uint32x2_t __attribute__((ext_vector_type(2)));
++    const float32x8_t values = {v0, v1, v2, v3, 0.f, 0.f, 0.f, 0.f};
++    const uint32x2_t  packed = __builtin_amdgcn_cvt_scalef32_pk8_fp8_f32(values, scale);
++    return packed[0];
++#else
++    __builtin_trap();
++    return 0;
++#endif
++}
++
+ /*
+  * FP32 to FP4 Conversion
+  * ----------------------
+@@ -639,7 +688,7 @@ __global__ __launch_bounds__(THREADS_PER_BLOCK, 4) void quantize_mxfp4_kernel(
+  */
+ template <typename DType, bool ROWWISE_USE_RHT = false, bool COLWISE_USE_RHT = false,
+           bool ROWWISE_USE_2D_BLOCK = false, bool COLWISE_USE_2D_BLOCK = false,
+-          bool ROWWISE_USE_SR = false, bool COLWISE_USE_SR = false>
++          bool ROWWISE_USE_SR = false, bool COLWISE_USE_SR = false, bool ROWWISE_MXFP8 = false>
+ __global__ __launch_bounds__(THREADS_PER_BLOCK, 4) void quantize_mxfp4_dual_kernel(
+     const DType *__restrict__ input_base, uint8_t *__restrict__ rowwise_fp4_base,
+     uint8_t *__restrict__ rowwise_scale_base, uint8_t *__restrict__ colwise_fp4_base,
+@@ -687,8 +736,8 @@ __global__ __launch_bounds__(THREADS_PER_BLOCK, 4) void quantize_mxfp4_dual_kern
+     const int base_m = block_m * BLOCK_M;
+     const int base_n = block_n * BLOCK_N;
+ 
+-    // Packed dimensions (2 FP4 values per byte), using padded sizes for output stride
+-    const int K_packed = N_pad / 2;
++    // The mixed mode stores one FP8 byte per rowwise element; FP4 remains packed.
++    const int K_packed = ROWWISE_MXFP8 ? N_pad : N_pad / 2;
+     const int M_packed = M_pad / 2;
+ 
+     constexpr int ROWS_PER_PASS   = WARP_SIZE / THREADS_PER_ROW;
+@@ -839,7 +888,11 @@ __global__ __launch_bounds__(THREADS_PER_BLOCK, 4) void quantize_mxfp4_dual_kern
+             tile_amax = warp_reduce_max_64_dpp(tile_amax);
+             float   r_scale_native;
+             uint8_t r_scale_e8m0;
+-            compute_tile_scale(tile_amax, r_scale_native, r_scale_e8m0);
++            if constexpr (ROWWISE_MXFP8) {
++                compute_mxfp8_e4m3_tile_scale(tile_amax, r_scale_native, r_scale_e8m0);
++            } else {
++                compute_tile_scale(tile_amax, r_scale_native, r_scale_e8m0);
++            }
+ #pragma unroll
+             for (int p = 0; p < PASSES_PER_TILE; p++) {
+                 r_rowwise_scale_native[p] = r_scale_native;
+@@ -847,14 +900,20 @@ __global__ __launch_bounds__(THREADS_PER_BLOCK, 4) void quantize_mxfp4_dual_kern
+             }
+         } else {
+ #pragma unroll
+-            for (int p = 0; p < PASSES_PER_TILE; p++)
+-                compute_tile_scale(r_rowwise_amax[p], r_rowwise_scale_native[p],
+-                                   r_rowwise_scale_e8m0[p]);
++            for (int p = 0; p < PASSES_PER_TILE; p++) {
++                if constexpr (ROWWISE_MXFP8) {
++                    compute_mxfp8_e4m3_tile_scale(r_rowwise_amax[p], r_rowwise_scale_native[p],
++                                                  r_rowwise_scale_e8m0[p]);
++                } else {
++                    compute_tile_scale(r_rowwise_amax[p], r_rowwise_scale_native[p],
++                                       r_rowwise_scale_e8m0[p]);
++                }
++            }
+         }
+ 
+         // ================================================================
+         // Rowwise Quantization (Horizantal Processing)
+-        // Step 3: Quantize from regs + Store FP4 / Scale
++        // Step 3: Quantize from regs + Store FP8 or FP4 / Scale
+         // ================================================================
+         {
+             const int col_base   = thread_in_row * ELEMS_PER_THREAD;
+@@ -867,29 +926,41 @@ __global__ __launch_bounds__(THREADS_PER_BLOCK, 4) void quantize_mxfp4_dual_kern
+                 const int global_row = tile_m + local_row;
+ 
+                 if (global_row < M) {
+-                    uint16_t fp4x4;
+-                    // Convert packed FP32 to FP4
+-                    if constexpr (ROWWISE_USE_SR) {
+-                        uint32_t rng = sr_hash(sr_seed ^ (blockDim.x * blockIdx.x + threadIdx.x));
+-                        fp4x4 =
+-                            cvt_f32x4_to_fp4x4_sr(r_rowwise_vals[pass][0], r_rowwise_vals[pass][1],
+-                                                  r_rowwise_vals[pass][2], r_rowwise_vals[pass][3],
+-                                                  r_rowwise_scale_native[pass], rng);
++                    if constexpr (ROWWISE_MXFP8) {
++                        const uint32_t fp8x4 =
++                            cvt_f32x4_to_fp8e4m3x4(r_rowwise_vals[pass][0], r_rowwise_vals[pass][1],
++                                                   r_rowwise_vals[pass][2], r_rowwise_vals[pass][3],
++                                                   r_rowwise_scale_native[pass]);
++                        if (global_col < N_pad) {
++                            *reinterpret_cast<uint32_t *>(rowwise_fp4 + global_row * K_packed +
++                                                          global_col) = fp8x4;
++                        }
+                     } else {
+-                        fp4x4 = cvt_f32x4_to_fp4x4(r_rowwise_vals[pass][0], r_rowwise_vals[pass][1],
++                        uint16_t fp4x4;
++                        if constexpr (ROWWISE_USE_SR) {
++                            uint32_t rng =
++                                sr_hash(sr_seed ^ (blockDim.x * blockIdx.x + threadIdx.x));
++                            fp4x4 = cvt_f32x4_to_fp4x4_sr(
++                                r_rowwise_vals[pass][0], r_rowwise_vals[pass][1],
++                                r_rowwise_vals[pass][2], r_rowwise_vals[pass][3],
++                                r_rowwise_scale_native[pass], rng);
++                        } else {
++                            fp4x4 =
++                                cvt_f32x4_to_fp4x4(r_rowwise_vals[pass][0], r_rowwise_vals[pass][1],
+                                                    r_rowwise_vals[pass][2], r_rowwise_vals[pass][3],
+                                                    r_rowwise_scale_native[pass]);
+-                    }
++                        }
+ 
+-                    if (global_col < N_pad) {
+-                        if (shuffle_rowwise) {
+-                            int packed_col   = global_col / 2;
+-                            int shuffled_idx = compute_shuffled_index<dtype::float4x2_e2m1>(
+-                                global_row, packed_col, K_packed);
+-                            *reinterpret_cast<uint16_t *>(rowwise_fp4 + shuffled_idx) = fp4x4;
+-                        } else {
+-                            *reinterpret_cast<uint16_t *>(rowwise_fp4 + global_row * K_packed +
+-                                                          global_col / 2) = fp4x4;
++                        if (global_col < N_pad) {
++                            if (shuffle_rowwise) {
++                                int packed_col   = global_col / 2;
++                                int shuffled_idx = compute_shuffled_index<dtype::float4x2_e2m1>(
++                                    global_row, packed_col, K_packed);
++                                *reinterpret_cast<uint16_t *>(rowwise_fp4 + shuffled_idx) = fp4x4;
++                            } else {
++                                *reinterpret_cast<uint16_t *>(rowwise_fp4 + global_row * K_packed +
++                                                              global_col / 2) = fp4x4;
++                            }
+                         }
+                     }
+ 
+@@ -1242,6 +1313,71 @@ template void quantize_mxfp4_dual_impl<dtype::bfloat16>(
+     int colwise_scale_M_pad, int colwise_scale_N_pad, ScalingRecipe rowwise_recipe,
+     ScalingRecipe colwise_recipe, hipStream_t stream);
+ 
++template <typename DType>
++void quantize_mxfp8_rowwise_mxfp4_colwise_impl(
++    const DType *input, dtype::float8_e4m3 *rowwise_output, uint8_t *rowwise_scale,
++    dtype::float4x2_e2m1 *colwise_output, uint8_t *colwise_scale, int M, int N, int M_pad,
++    int N_pad, int rowwise_scale_stride, int colwise_scale_stride, int rowwise_scale_N,
++    int colwise_scale_N, int colwise_scale_M_pad, int colwise_scale_N_pad,
++    ScalingRecipe rowwise_recipe, ScalingRecipe colwise_recipe, hipStream_t stream) {
++    dim3           grid((M_pad + BLOCK_M - 1) / BLOCK_M, (N_pad + BLOCK_N - 1) / BLOCK_N);
++    dim3           block(warp_size() * WARPS_PER_BLOCK);
++    const uint32_t sr_seed = 0;
++
++#define QUANTIZE_MXFP8_ROW_MXFP4_COL_ARGS                                                          \
++    input, reinterpret_cast<uint8_t *>(rowwise_output), rowwise_scale,                             \
++        reinterpret_cast<uint8_t *>(colwise_output), colwise_scale, M, N, M_pad, N_pad,            \
++        rowwise_scale_stride, colwise_scale_stride, rowwise_scale_N, M, rowwise_scale_N, N,        \
++        colwise_scale_N, colwise_scale_M_pad, colwise_scale_N_pad, false,                          \
++        colwise_recipe.shuffle_out, false, colwise_recipe.shuffle_scale, sr_seed
++
++#define QUANTIZE_MXFP8_ROW_MXFP4_COL_LAUNCH(ROW_2D, COL_2D, COL_RHT)                               \
++    quantize_mxfp4_dual_kernel<DType, false, COL_RHT, ROW_2D, COL_2D, false, false, true>          \
++        <<<grid, block, 0, stream>>>(QUANTIZE_MXFP8_ROW_MXFP4_COL_ARGS)
++
++    if (rowwise_recipe.use_2d_block) {
++        if (colwise_recipe.use_2d_block) {
++            if (colwise_recipe.use_rht) {
++                QUANTIZE_MXFP8_ROW_MXFP4_COL_LAUNCH(true, true, true);
++            } else {
++                QUANTIZE_MXFP8_ROW_MXFP4_COL_LAUNCH(true, true, false);
++            }
++        } else if (colwise_recipe.use_rht) {
++            QUANTIZE_MXFP8_ROW_MXFP4_COL_LAUNCH(true, false, true);
++        } else {
++            QUANTIZE_MXFP8_ROW_MXFP4_COL_LAUNCH(true, false, false);
++        }
++    } else {
++        if (colwise_recipe.use_2d_block) {
++            if (colwise_recipe.use_rht) {
++                QUANTIZE_MXFP8_ROW_MXFP4_COL_LAUNCH(false, true, true);
++            } else {
++                QUANTIZE_MXFP8_ROW_MXFP4_COL_LAUNCH(false, true, false);
++            }
++        } else if (colwise_recipe.use_rht) {
++            QUANTIZE_MXFP8_ROW_MXFP4_COL_LAUNCH(false, false, true);
++        } else {
++            QUANTIZE_MXFP8_ROW_MXFP4_COL_LAUNCH(false, false, false);
++        }
++    }
++
++#undef QUANTIZE_MXFP8_ROW_MXFP4_COL_LAUNCH
++#undef QUANTIZE_MXFP8_ROW_MXFP4_COL_ARGS
++}
++
++template void quantize_mxfp8_rowwise_mxfp4_colwise_impl<dtype::float16>(
++    const dtype::float16 *input, dtype::float8_e4m3 *rowwise_output, uint8_t *rowwise_scale,
++    dtype::float4x2_e2m1 *colwise_output, uint8_t *colwise_scale, int M, int N, int M_pad,
++    int N_pad, int rowwise_scale_stride, int colwise_scale_stride, int rowwise_scale_N,
++    int colwise_scale_N, int colwise_scale_M_pad, int colwise_scale_N_pad,
++    ScalingRecipe rowwise_recipe, ScalingRecipe colwise_recipe, hipStream_t stream);
++template void quantize_mxfp8_rowwise_mxfp4_colwise_impl<dtype::bfloat16>(
++    const dtype::bfloat16 *input, dtype::float8_e4m3 *rowwise_output, uint8_t *rowwise_scale,
++    dtype::float4x2_e2m1 *colwise_output, uint8_t *colwise_scale, int M, int N, int M_pad,
++    int N_pad, int rowwise_scale_stride, int colwise_scale_stride, int rowwise_scale_N,
++    int colwise_scale_N, int colwise_scale_M_pad, int colwise_scale_N_pad,
++    ScalingRecipe rowwise_recipe, ScalingRecipe colwise_recipe, hipStream_t stream);
++
+ template <typename DType>
+ void quantize_mxfp4_impl(const DType *input, dtype::float4x2_e2m1 *output, uint8_t *scale,
+                          QuantizeMode mode, int G, int M, int N, int M_pad, int N_pad,
+diff --git a/csrc/pytorch/bindings_pytorch.cpp b/csrc/pytorch/bindings_pytorch.cpp
+index e48d0ff4..2f3023f0 100644
+--- a/csrc/pytorch/bindings_pytorch.cpp
++++ b/csrc/pytorch/bindings_pytorch.cpp
+@@ -49,6 +49,10 @@ TORCH_LIBRARY(primus_turbo_cpp_extension, m) {
+           "ScalarType dest_dtype) -> Tensor");
+ 
+     // ********* MXFP4 Quantization *********
++    m.def("quantize_mxfp8_rowwise_mxfp4_colwise(Tensor input, "
++          "bool rowwise_fp8_use_2d_block, bool colwise_fp4_use_2d_block, "
++          "bool colwise_fp4_use_rht, bool shuffle_colwise_scale=False, "
++          "bool shuffle_colwise=False) -> Tensor[]");
+     m.def("quantize_mxfp4_dual(Tensor input, ScalarType dest_dtype, "
+           "int padding_align_size, "
+           "bool rowwise_use_2d_block, bool rowwise_use_sr, bool rowwise_use_rht, "
+@@ -183,6 +187,7 @@ TORCH_LIBRARY_IMPL(primus_turbo_cpp_extension, CUDA, m) {
+     m.impl("quantize_fp8_blockwise_for_weight", quantize_fp8_blockwise_for_weight);
+ 
+     // ********* MXFP4 Quantization *********
++    m.impl("quantize_mxfp8_rowwise_mxfp4_colwise", quantize_mxfp8_rowwise_mxfp4_colwise);
+     m.impl("quantize_mxfp4_dual", quantize_mxfp4_dual);
+     m.impl("quantize_mxfp4", quantize_mxfp4);
+     m.impl("dequantize_mxfp4", dequantize_mxfp4);
+@@ -244,6 +249,7 @@ TORCH_LIBRARY_IMPL(primus_turbo_cpp_extension, Meta, m) {
+     m.impl("quantize_fp8_blockwise_for_weight", quantize_fp8_blockwise_for_weight_meta);
+ 
+     // ********* MXFP4 Quantization *********
++    m.impl("quantize_mxfp8_rowwise_mxfp4_colwise", quantize_mxfp8_rowwise_mxfp4_colwise_meta);
+     m.impl("quantize_mxfp4_dual", quantize_mxfp4_dual_meta);
+     m.impl("quantize_mxfp4", quantize_mxfp4_meta);
+     m.impl("dequantize_mxfp4", dequantize_mxfp4_meta);
+diff --git a/csrc/pytorch/extensions.h b/csrc/pytorch/extensions.h
+index ba67a3b0..53e9f98d 100644
+--- a/csrc/pytorch/extensions.h
++++ b/csrc/pytorch/extensions.h
+@@ -77,6 +77,16 @@ at::Tensor dequantize_fp8_tensorwise(const at::Tensor input, const at::Tensor sc
+ at::Tensor dequantize_fp8_tensorwise_meta(const at::Tensor input, const at::Tensor scale_inv,
+                                           const at::ScalarType dest_dtype);
+ 
++std::vector<at::Tensor> quantize_mxfp8_rowwise_mxfp4_colwise(
++    const at::Tensor input, const bool rowwise_fp8_use_2d_block,
++    const bool colwise_fp4_use_2d_block, const bool colwise_fp4_use_rht,
++    const bool shuffle_colwise_scale = false, const bool shuffle_colwise = false);
++
++std::vector<at::Tensor> quantize_mxfp8_rowwise_mxfp4_colwise_meta(
++    const at::Tensor input, const bool rowwise_fp8_use_2d_block,
++    const bool colwise_fp4_use_2d_block, const bool colwise_fp4_use_rht,
++    const bool shuffle_colwise_scale = false, const bool shuffle_colwise = false);
++
+ std::vector<at::Tensor> quantize_mxfp4_dual(
+     const at::Tensor input, const at::ScalarType dest_dtype, const int64_t padding_align_size,
+     const bool rowwise_use_2d_block, const bool rowwise_use_sr, const bool rowwise_use_rht,
+diff --git a/csrc/pytorch/quantization/quantization.cpp b/csrc/pytorch/quantization/quantization.cpp
+index 9890173e..d019a924 100644
+--- a/csrc/pytorch/quantization/quantization.cpp
++++ b/csrc/pytorch/quantization/quantization.cpp
+@@ -526,6 +526,73 @@ at::Tensor dequantize_mxfp4(const at::Tensor input, const at::Tensor scale_inv,
+     return output_2d;
+ }
+ 
++// Quantize rowwise MXFP8 E4M3 and colwise MXFP4 E2M1 in one input pass.
++std::vector<at::Tensor> quantize_mxfp8_rowwise_mxfp4_colwise(const at::Tensor input,
++                                                             const bool rowwise_fp8_use_2d_block,
++                                                             const bool colwise_fp4_use_2d_block,
++                                                             const bool colwise_fp4_use_rht,
++                                                             const bool shuffle_colwise_scale,
++                                                             const bool shuffle_colwise) {
++    using namespace primus_turbo::detail;
++
++    PRIMUS_TURBO_CHECK(input.is_cuda(), "Input must be a CUDA tensor");
++    PRIMUS_TURBO_CHECK(input.scalar_type() == at::kBFloat16 || input.scalar_type() == at::kHalf,
++                       "Input must be BFloat16 or Half");
++    PRIMUS_TURBO_CHECK(input.dim() == 2, "Input must be 2D");
++    PRIMUS_TURBO_CHECK(input.is_contiguous(), "Input must be contiguous");
++
++    const int64_t M     = input.size(0);
++    const int64_t N     = input.size(1);
++    const int64_t M_pad = cdiv(M, MXFP4_K_DIM_PADDING_ALIGN_SIZE) * MXFP4_K_DIM_PADDING_ALIGN_SIZE;
++    const int64_t N_pad = cdiv(N, MXFP8_K_DIM_PADDING_ALIGN_SIZE) * MXFP8_K_DIM_PADDING_ALIGN_SIZE;
++    PRIMUS_TURBO_CHECK(N % MXFP4_BLOCK_SIZE == 0, "N must be divisible by ", MXFP4_BLOCK_SIZE);
++    if (shuffle_colwise) {
++        PRIMUS_TURBO_CHECK(N % MXFP4_SHUFFLE_BN == 0, "N must be divisible by ", MXFP4_SHUFFLE_BN,
++                           " for shuffled colwise FP4. But got N=", N);
++    }
++
++    auto device = input.device();
++    auto stream = at::cuda::getCurrentCUDAStream();
++
++    const int64_t rowwise_scale_N = cdiv(N_pad, MXFP8_BLOCK_SIZE);
++    at::Tensor    rowwise_output =
++        at::empty({M, N_pad}, at::TensorOptions().dtype(at::kByte).device(device));
++    at::Tensor rowwise_scale =
++        at::empty({M, rowwise_scale_N}, at::TensorOptions().dtype(at::kByte).device(device));
++
++    const int64_t colwise_scale_M_pad = cdiv(N, 256) * 256;
++    const int64_t colwise_scale_N     = cdiv(M_pad, MXFP4_BLOCK_SIZE);
++    const int64_t colwise_scale_N_pad = cdiv(colwise_scale_N, 8) * 8;
++    at::Tensor    colwise_scale;
++    if (shuffle_colwise_scale) {
++        colwise_scale = at::full({colwise_scale_M_pad, colwise_scale_N_pad}, /*scale pad=*/0,
++                                 at::TensorOptions().dtype(at::kByte).device(device));
++    } else {
++        colwise_scale =
++            at::empty({N, colwise_scale_N}, at::TensorOptions().dtype(at::kByte).device(device));
++    }
++    at::Tensor colwise_output =
++        at::empty({N, M_pad / 2}, at::TensorOptions().dtype(at::kByte).device(device));
++
++    TORCH_TYPE_SWITCH_FP16_BF16(input.scalar_type(), DType, {
++        quantize_mxfp8_rowwise_mxfp4_colwise_impl<DType>(
++            reinterpret_cast<DType *>(input.data_ptr()),
++            reinterpret_cast<dtype::float8_e4m3 *>(rowwise_output.data_ptr()),
++            rowwise_scale.data_ptr<uint8_t>(),
++            reinterpret_cast<dtype::float4x2_e2m1 *>(colwise_output.data_ptr()),
++            colwise_scale.data_ptr<uint8_t>(), M, N, M_pad, N_pad, rowwise_scale.stride(0),
++            colwise_scale.stride(0), rowwise_scale_N, colwise_scale_N, colwise_scale_M_pad,
++            colwise_scale_N_pad,
++            ScalingRecipe(rowwise_fp8_use_2d_block, false, false, false, false),
++            ScalingRecipe(colwise_fp4_use_2d_block, false, colwise_fp4_use_rht,
++                          shuffle_colwise_scale, shuffle_colwise),
++            stream);
++    });
++
++    return {rowwise_output.view(at::kFloat8_e4m3fn), rowwise_scale.view(at::kFloat8_e8m0fnu),
++            colwise_output.view(at::kFloat4_e2m1fn_x2), colwise_scale.view(at::kFloat8_e8m0fnu)};
++}
++
+ // Quantize MXFP4 with dual mode
+ std::vector<at::Tensor> quantize_mxfp4_dual(
+     const at::Tensor input, const at::ScalarType dest_dtype, const int64_t padding_align_size,
+diff --git a/csrc/pytorch/quantization/quantization_meta.cpp b/csrc/pytorch/quantization/quantization_meta.cpp
+index 2e78c8e1..fbbd4324 100644
+--- a/csrc/pytorch/quantization/quantization_meta.cpp
++++ b/csrc/pytorch/quantization/quantization_meta.cpp
+@@ -157,6 +157,44 @@ at::Tensor grouped_dequantize_mxfp8_meta(const at::Tensor input, const at::Tenso
+     return at::empty({total_M_val, n_cols}, at::dtype(dest_dtype).device(at::kMeta));
+ }
+ 
++std::vector<at::Tensor> quantize_mxfp8_rowwise_mxfp4_colwise_meta(
++    const at::Tensor input, const bool rowwise_fp8_use_2d_block,
++    const bool colwise_fp4_use_2d_block, const bool colwise_fp4_use_rht,
++    const bool shuffle_colwise_scale, const bool shuffle_colwise) {
++    using namespace primus_turbo::detail;
++
++    auto cdiv = [](int64_t a, int64_t b) -> int64_t { return (a + b - 1) / b; };
++    PRIMUS_TURBO_CHECK(input.scalar_type() == at::kBFloat16 || input.scalar_type() == at::kHalf,
++                       "Input must be BFloat16 or Half");
++    PRIMUS_TURBO_CHECK(input.dim() == 2, "Input must be 2D");
++    PRIMUS_TURBO_CHECK(input.is_contiguous(), "Input must be contiguous");
++
++    const int64_t M     = input.size(0);
++    const int64_t N     = input.size(1);
++    const int64_t M_pad = cdiv(M, MXFP4_K_DIM_PADDING_ALIGN_SIZE) * MXFP4_K_DIM_PADDING_ALIGN_SIZE;
++    const int64_t N_pad = cdiv(N, MXFP8_K_DIM_PADDING_ALIGN_SIZE) * MXFP8_K_DIM_PADDING_ALIGN_SIZE;
++    PRIMUS_TURBO_CHECK(N % MXFP4_BLOCK_SIZE == 0, "N must be divisible by ", MXFP4_BLOCK_SIZE);
++    if (shuffle_colwise) {
++        PRIMUS_TURBO_CHECK(N % MXFP4_SHUFFLE_BN == 0,
++                           "N must be divisible by 16 for shuffled colwise FP4");
++    }
++
++    const int64_t rowwise_scale_N     = cdiv(N_pad, MXFP8_BLOCK_SIZE);
++    const int64_t colwise_scale_M_pad = cdiv(N, 256) * 256;
++    const int64_t colwise_scale_N     = cdiv(M_pad, MXFP4_BLOCK_SIZE);
++    const int64_t colwise_scale_N_pad = cdiv(colwise_scale_N, 8) * 8;
++    const int64_t colwise_scale_rows  = shuffle_colwise_scale ? colwise_scale_M_pad : N;
++    const int64_t colwise_scale_columns =
++        shuffle_colwise_scale ? colwise_scale_N_pad : colwise_scale_N;
++    auto options = at::TensorOptions().dtype(at::kByte).device(at::kMeta);
++
++    return {
++        at::empty({M, N_pad}, options).view(at::kFloat8_e4m3fn),
++        at::empty({M, rowwise_scale_N}, options).view(at::kFloat8_e8m0fnu),
++        at::empty({N, M_pad / 2}, options).view(at::kFloat4_e2m1fn_x2),
++        at::empty({colwise_scale_rows, colwise_scale_columns}, options).view(at::kFloat8_e8m0fnu)};
++}
++
+ std::vector<at::Tensor> quantize_mxfp4_dual_meta(
+     const at::Tensor input, const at::ScalarType dest_dtype, const int64_t padding_align_size,
+     const bool rowwise_use_2d_block, const bool rowwise_use_sr, const bool rowwise_use_rht,
+diff --git a/tests/pytorch/ops/test_quantization.py b/tests/pytorch/ops/test_quantization.py
+index e88fadb7..e23f6c56 100644
+--- a/tests/pytorch/ops/test_quantization.py
++++ b/tests/pytorch/ops/test_quantization.py
+@@ -353,6 +353,88 @@ def mxfp4_padded_ref(x: torch.Tensor, axis: int, padding_align_size: int, dtype:
+     return torch.cat([x, zeros], dim=2)
+ 
+ 
++@pytest.mark.parametrize("orig_dtype", [torch.bfloat16, torch.float16])
++@pytest.mark.parametrize(
++    "M,N,row_2d,col_2d,col_rht,shuffle_scale,shuffle_data",
++    [
++        pytest.param(
++            128,
++            256,
++            row_2d,
++            col_2d,
++            col_rht,
++            False,
++            False,
++            id=f"dispatch-{int(row_2d)}{int(col_2d)}{int(col_rht)}",
++        )
++        for row_2d in (False, True)
++        for col_2d in (False, True)
++        for col_rht in (False, True)
++    ]
++    + [
++        pytest.param(96, 160, False, False, True, True, True, id="activation-shuffled"),
++        pytest.param(256, 384, True, True, False, True, True, id="weight-shuffled"),
++    ],
++)
++def test_quantize_mxfp8_rowwise_mxfp4_colwise_matches_independent_ops(
++    orig_dtype, M, N, row_2d, col_2d, col_rht, shuffle_scale, shuffle_data
++):
++    mxfp4_supported, reason = check_mxfp4_support()
++    if not mxfp4_supported:
++        pytest.skip(reason)
++
++    torch.manual_seed(42)
++    x = torch.randn((M, N), device="cuda", dtype=orig_dtype)
++    actual = torch.ops.primus_turbo_cpp_extension.quantize_mxfp8_rowwise_mxfp4_colwise(
++        x, row_2d, col_2d, col_rht, shuffle_scale, shuffle_data
++    )
++    fp8_ref = torch.ops.primus_turbo_cpp_extension.quantize_mxfp8(
++        x, torch.float8_e4m3fn, 1, 128, row_2d, False, False
++    )
++    fp4_dual_ref = torch.ops.primus_turbo_cpp_extension.quantize_mxfp4_dual(
++        x,
++        turbo.float4_e2m1fn_x2,
++        128,
++        False,
++        False,
++        False,
++        col_2d,
++        False,
++        col_rht,
++        False,
++        False,
++        shuffle_scale,
++        shuffle_data,
++    )
++
++    for fused, reference in zip(actual, (*fp8_ref, *fp4_dual_ref[2:])):
++        torch.testing.assert_close(fused.view(torch.uint8), reference.view(torch.uint8), atol=0, rtol=0)
++
++
++def test_quantize_mxfp8_rowwise_mxfp4_colwise_meta_and_fake_shapes():
++    expected = [
++        ((96, 256), torch.float8_e4m3fn),
++        ((96, 8), torch.float8_e8m0fnu),
++        ((160, 64), turbo.float4_e2m1fn_x2),
++        ((256, 8), torch.float8_e8m0fnu),
++    ]
++
++    meta_x = torch.empty((96, 160), device="meta", dtype=torch.bfloat16)
++    meta_outputs = torch.ops.primus_turbo_cpp_extension.quantize_mxfp8_rowwise_mxfp4_colwise(
++        meta_x, False, True, True, True, True
++    )
++    assert [(tuple(output.shape), output.dtype) for output in meta_outputs] == expected
++
++    from torch._subclasses.fake_tensor import FakeTensorMode
++
++    with FakeTensorMode():
++        fake_x = torch.empty((96, 160), device="cuda", dtype=torch.float16)
++        fake_outputs = torch.ops.primus_turbo_cpp_extension.quantize_mxfp8_rowwise_mxfp4_colwise(
++            fake_x, False, True, True, True, True
++        )
++        assert [(tuple(output.shape), output.dtype) for output in fake_outputs] == expected
++
++
+ @pytest.mark.parametrize("orig_dtype", [torch.bfloat16, torch.float16])
+ @pytest.mark.parametrize("dest_dtype", [turbo.float8_e4m3, turbo.float8_e5m2])
+ @pytest.mark.parametrize("batched", [False, True])
+-- 
+2.43.0
+

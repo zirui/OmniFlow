@@ -7,17 +7,19 @@ The qualified profiles target MI355X GPUs and the MLPerf validation-loss
 threshold `0.586`. Tensorwise FP8 uses `zirui3/primus-v26.3-flux:v0.4`; the
 DP32 PR492 run uses `zirui3/primus-v26.3-flux:v0.4.1`.
 
-The two accepted MXFP4 Pareto recipes use
-`zirui3/primus-v26.3-flux:v0.4-mxfp4-uos`. Its reproducible source is
+The two MXFP4 Pareto recipes use
+`zirui3/primus-v26.3-flux:v0.4-mxfp4-mixed-quant-uos`. Its reproducible source is
 [`Dockerfile.mxfp4`](Dockerfile.mxfp4), which pins Primus-Turbo revision
-`220ead50861860f47161787694319f4b0853df3a` and the `uos_7p25` scale policy.
+`220ead50861860f47161787694319f4b0853df3a`, applies the committed mixed-quant
+patch `a58e3d9e1ea9602ebf2f3d4553d8e6bffaa21030`, and retains the `uos_7p25`
+scale policy.
 Training runs directly through OmniFlow without the Primus CLI or Python
-framework. Rebuild the validated image with:
+framework. Build the updated image from the OmniFlow repository root so the
+Docker context includes the pinned patch:
 
 ```bash
-mkdir -p /tmp/empty-context
 docker build -f examples/mlperf/flux1/Dockerfile.mxfp4 \
-  -t zirui3/primus-v26.3-flux:v0.4-mxfp4-uos /tmp/empty-context
+  -t zirui3/primus-v26.3-flux:v0.4-mxfp4-mixed-quant-uos .
 ```
 
 ## Data

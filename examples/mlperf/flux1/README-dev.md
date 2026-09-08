@@ -123,7 +123,7 @@ Pareto B, custom recipes, and tensorwise FP8 have different graphs and cannot
 share archives. For example, prewarm Pareto A with:
 
 ```bash
-DOCKER_IMAGE=zirui3/primus-v26.3-flux:v0.4-mxfp4-uos
+DOCKER_IMAGE=zirui3/primus-v26.3-flux:v0.4-mxfp4-mixed-quant-uos
 docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
   --ipc=host --shm-size=20G \
   -e HIP_VISIBLE_DEVICES=0 -e PYTHONPATH=/workspace/OmniFlow/src \

@@ -2,9 +2,13 @@ FROM zirui3/primus-v26.3-flux:v0.4
 
 ARG PRIMUS_TURBO_REVISION=220ead50861860f47161787694319f4b0853df3a
 
+COPY examples/mlperf/flux1/patches/0001-Add-fused-MXFP8-row-MXFP4-column-quantization.patch /tmp/mixed-quant.patch
+
 RUN git clone --recursive https://github.com/AMD-AGI/Primus-Turbo.git /tmp/Primus-Turbo && \
     git -C /tmp/Primus-Turbo checkout "${PRIMUS_TURBO_REVISION}" && \
     git -C /tmp/Primus-Turbo submodule update --init --recursive && \
+    git -C /tmp/Primus-Turbo apply --check /tmp/mixed-quant.patch && \
+    git -C /tmp/Primus-Turbo apply /tmp/mixed-quant.patch && \
     /opt/venv/bin/python - <<'PY'
 from pathlib import Path
 
@@ -28,10 +32,13 @@ from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
 
 assert gemm_fp4_impl and gemm_fp8_impl
 assert torch.ops.primus_turbo_cpp_extension.quantize_mxfp4_dual
+assert torch.ops.primus_turbo_cpp_extension.quantize_mxfp4
 assert torch.ops.primus_turbo_cpp_extension.quantize_mxfp8
+assert torch.ops.primus_turbo_cpp_extension.quantize_mxfp8_rowwise_mxfp4_colwise
 PY
 
 LABEL com.amd.primus.mxfp4-scale-policy="uos_7p25"
 LABEL com.amd.primus-turbo.revision="${PRIMUS_TURBO_REVISION}"
+LABEL com.amd.primus-turbo.mixed-quant-revision="a58e3d9e1ea9602ebf2f3d4553d8e6bffaa21030"
 
 CMD ["/usr/bin/bash"]
