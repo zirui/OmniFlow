@@ -56,6 +56,7 @@ batch size:
 | `config_4n_gbs1024_mxfp4_pareto_a.sh` | 4 | 32 | 1 | 1024 |
 | `config_4n_gbs1024_mxfp4_pareto_b.sh` | 4 | 32 | 1 | 1024 |
 | `config_4n_gbs1024_mxfp4_custom.sh` | 4 | 32 | 1 | 1024 |
+| `config_4n_gbs1024_mxfp4_under80.sh` | 4 | 32 | 1 | 1024 |
 
 Run inside a matching Slurm allocation:
 
@@ -71,6 +72,26 @@ The qualified `pareto_a` and `pareto_b` recipes remain fixed: `pareto_a` has
 171 MXFP8 forward linears. The `custom` recipe is an experimental composition
 surface. All three keep MXFP4 backward on all 228 selected block linears and
 require the pinned image and AITER preshuffle backend.
+
+### Qualified sub-80-minute profile
+
+`config_4n_gbs1024_mxfp4_under80.sh` is the performance-qualified extension of
+Pareto A: all 152 double-block Linear modules use BF16 forward, the 76
+single-block Linear modules use MXFP8 forward, and all 228 backward paths remain
+MXFP4. It uses tensor-scale E4M3 HSDP gradient AllReduce, seed 10009, delayed
+validation, mixed operand quantization, and a recipe-specific exact Inductor
+cache. On four MI355X nodes it reached `0.585692 @ step 8704` in **79.882 min**
+(E2E 1859.60 samples/s, steady median 1919.93 samples/s):
+
+```bash
+TORCHINDUCTOR_CACHE_SEED=/path/to/under80-cache-rank%r.tar.zst \
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
+FLUX_CONFIG=config_4n_gbs1024_mxfp4_under80.sh \
+bash examples/mlperf/flux1/run_with_docker_slurm.sh
+```
+
+The exact cache is mandatory for the qualified timing and must be rebuilt after
+any image, graph, shape, or compiler change.
 
 ### Custom MXFP4 options
 

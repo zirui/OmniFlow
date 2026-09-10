@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+source "$(dirname -- "${BASH_SOURCE[0]}")/config_4n_gbs1024.sh"
+
+export DOCKER_IMAGE=${DOCKER_IMAGE:-zirui3/primus-v26.3-flux:v0.4-mxfp4-mixed-quant-uos}
+export DP_REPLICATE=4
+export FLUX_FLOAT8_RECIPE=
+export FLUX_FP8_GEMM_BACKEND=
+export FLUX_FP8_ALL_GATHER=0
+export PRIMUS_FLUX_REUSE_FP8_INPUT=0
+export FLUX_MXFP4_RECIPE=custom
+export FLUX_MXFP4_FORWARD_PRECISION=mxfp8
+export FLUX_MXFP4_BF16_FORWARD_SCOPE=double_all
+export FLUX_MXFP4_SELECTIVE_FORWARD_SCOPE=none
+export FLUX_MXFP4_EVAL_PRECISION=bf16
+export FSDP2_HSDP_FP8_ALL_REDUCE=e4m3
+export FSDP2_HSDP_FP8_BLOCK_SIZE=0
+export FSDP2_HSDP_FP8_MIN_NUMEL=1048576
+export MLPERF_VALIDATION_START_STEP=7168
+export SEED=10009

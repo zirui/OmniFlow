@@ -367,7 +367,7 @@ def test_mxfp4_eval_bf16_bypasses_strategy_and_gradient_sr_reaches_training(monk
     assert calls == []
 
 
-@pytest.mark.parametrize("profile", ["pareto_a", "pareto_b", "custom"])
+@pytest.mark.parametrize("profile", ["pareto_a", "pareto_b", "custom", "under80"])
 def test_mxfp4_profiles_use_mixed_quant_image(profile):
     env = os.environ.copy()
     env.pop("DOCKER_IMAGE", None)
@@ -391,6 +391,19 @@ def test_mxfp4_pareto_profiles_use_bf16_evaluation(profile):
         ["bash", "-c", command], check=True, capture_output=True, text=True
     )
     assert result.stdout == "bf16"
+
+
+def test_mxfp4_under80_profile_is_frozen():
+    command = (
+        "source examples/mlperf/flux1/config_4n_gbs1024_mxfp4_under80.sh; "
+        "printf '%s ' \"$FLUX_MXFP4_FORWARD_PRECISION\" "
+        "\"$FLUX_MXFP4_BF16_FORWARD_SCOPE\" \"$FSDP2_HSDP_FP8_ALL_REDUCE\" "
+        "\"$MLPERF_VALIDATION_START_STEP\" \"$SEED\""
+    )
+    result = subprocess.run(
+        ["bash", "-c", command], check=True, capture_output=True, text=True
+    )
+    assert result.stdout == "mxfp8 double_all e4m3 7168 10009 "
 
 
 def test_mxfp4_capture_dir_is_defaulted_after_output_dir(tmp_path):
