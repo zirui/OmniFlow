@@ -431,6 +431,7 @@ class DiffusionArgBuilder:
             ("warmup_validation_steps",): ("mlperf_warmup_validation_steps",),
             ("target_eval_loss",): ("mlperf_target_eval_loss",),
             ("eval_samples",): ("mlperf_eval_samples",),
+            ("validation_start_step",): ("mlperf_validation_start_step",),
             ("eval_steps",): ("mlperf_eval_steps",),
             ("train_samples",): ("mlperf_train_samples",),
             ("eval_total_samples",): ("mlperf_eval_total_samples",),

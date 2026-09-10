@@ -85,4 +85,5 @@ mlperf:
   warmup_validation_steps: ${MLPERF_WARMUP_VALIDATION_STEPS}
   target_eval_loss: ${TARGET_ACCURACY}
   eval_samples: ${VAL_CHECK_INTERVAL}
+  validation_start_step: ${MLPERF_VALIDATION_START_STEP}
   output_file: ${MLLOG_OUTPUT_FILE}

@@ -130,8 +130,9 @@ class FSDP2Trainer(BaseWanTrainer):
                     "expected e4m3 or e5m2"
                 )
             block_size = int(os.getenv("FSDP2_HSDP_FP8_BLOCK_SIZE", "0"))
-            if block_size < 0:
-                raise ValueError("FSDP2_HSDP_FP8_BLOCK_SIZE must be non-negative")
+            min_numel = int(os.getenv("FSDP2_HSDP_FP8_MIN_NUMEL", str(1 << 20)))
+            if block_size < 0 or min_numel < 0:
+                raise ValueError("FP8 HSDP block size and minimum tensor size must be non-negative")
             from types import SimpleNamespace
 
             from torch.distributed.fsdp._fully_shard import _fsdp_collectives
@@ -142,7 +143,7 @@ class FSDP2Trainer(BaseWanTrainer):
                 fp8_limit = torch.finfo(fp8_dtype).max
 
                 def fp8_gradient_all_reduce(tensor, op=dist.ReduceOp.SUM, group=None, async_op=False):
-                    if tensor.dtype != torch.bfloat16 or tensor.numel() < 1 << 20:
+                    if tensor.dtype != torch.bfloat16 or tensor.numel() < min_numel:
                         return original_dist.all_reduce(tensor, op=op, group=group, async_op=async_op)
                     if async_op or op not in (dist.ReduceOp.SUM, dist.ReduceOp.AVG):
                         raise ValueError("FP8 HSDP gradient AllReduce only supports synchronous SUM or AVG")
@@ -157,13 +158,13 @@ class FSDP2Trainer(BaseWanTrainer):
                         blocks = flat
                         absmax = flat.abs().amax().float()
                     original_dist.all_reduce(absmax, op=dist.ReduceOp.MAX, group=group)
-                    scale = (fp8_limit / world_size) / absmax.clamp_min(torch.finfo(torch.float32).eps)
+                    quant_limit = fp8_limit / world_size
+                    scale = quant_limit / absmax.clamp_min(torch.finfo(torch.float32).eps)
                     if block_size:
                         # E8M0-style power-of-two scales make scaling exact.
                         scale = torch.exp2(torch.floor(torch.log2(scale)).clamp(-126, 127))[:, None]
-                    quantized = (blocks * scale).clamp(
-                        -fp8_limit / world_size, fp8_limit / world_size
-                    ).to(fp8_dtype)
+                    scaled = (blocks * scale).clamp(-quant_limit, quant_limit)
+                    quantized = scaled.to(fp8_dtype)
                     original_dist.all_reduce(quantized, op=dist.ReduceOp.SUM, group=group)
                     reduced = (quantized.to(tensor.dtype) / scale).flatten()[: tensor.numel()]
                     tensor.copy_(reduced.view_as(tensor))
@@ -176,7 +177,10 @@ class FSDP2Trainer(BaseWanTrainer):
                 _fsdp_collectives.dist = fp8_dist
             if self.rank == 0:
                 scaling = f"block-{block_size}" if block_size else "tensor-wise"
-                logger.info(f"FSDP2: HSDP gradient AllReduce uses FP8 {fp8_all_reduce}, {scaling}")
+                logger.info(
+                    f"FSDP2: HSDP gradient AllReduce uses FP8 {fp8_all_reduce}, {scaling}, "
+                    f"min_numel={min_numel}"
+                )
 
         # Keep FP32 parameter/optimizer storage while allowing an explicit
         # reduction-dtype experiment around the FP32-qualified default.

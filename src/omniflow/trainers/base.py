@@ -330,6 +330,9 @@ class BaseWanTrainer:
             self.args.get("mlperf_target_eval_loss", 0.586)
         )
         self.mlperf_eval_samples = int(self.args.get("mlperf_eval_samples", 262144))
+        self.mlperf_validation_start_step = int(
+            self.args.get("mlperf_validation_start_step", 0)
+        )
         self.mlperf_run_success = False
         self.mlperf_logger = None
         self.mlperf_constants = None
@@ -1186,6 +1189,7 @@ class BaseWanTrainer:
 
                     if (
                         self.mlperf_enabled
+                        and self.global_step >= self.mlperf_validation_start_step
                         and self.global_step % self.mlperf_eval_freq_steps == 0
                     ):
                         self._mlperf_log_block_stop(self.global_step)
