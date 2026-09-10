@@ -65,7 +65,10 @@ spur run --jobid=<job-id> --overlap -N1 -n1 --nodelist=<node> \
 ```
 
 Every node must see the same repository, datasets, output path, and launch
-environment.
+environment. The same pattern also works over direct SSH: start all commands
+concurrently, replace `spur run ... env` with `ssh <node> env`, and keep the
+same rendezvous values plus one unique contiguous `NODE_RANK` per node. Use
+only nodes owned by the current allocation.
 
 ## Inductor cache
 
@@ -125,16 +128,40 @@ settings change.
 
 ## Network checks
 
+The four-node profile includes the Primus runner scheduling defaults that
+matter to native `torchrun`: `HSA_ENABLE_SDMA=1`, `GPU_MAX_HW_QUEUES=2`,
+`TORCH_NCCL_HIGH_PRIORITY=1`, `NCCL_CHECKS_DISABLE=1`,
+`NCCL_P2P_NET_CHUNKSIZE=524288`, and the tensor-register allocator hook off.
+Keep these defaults for both launch styles unless a matched A/B test shows a
+regression. `run_with_docker.sh` also applies the shared AINIC defaults used by
+Primus CLI: all eight `ionic_*:1` HCAs, GID 1, TC/FIFO TC 104/192, RoCE v2,
+inline sends, one QP per connection, retry/timeout 20/300, 56 P2P channels,
+`librccl-anp.so`, GDR flush disabled, CPU affinity ignored, and cross-NIC off.
+Only the socket interface and DMA-BUF setting differ below.
+
 For multi-node runs, verify that the ABI-4 libionic mount and
-`/dev/infiniband` exist. With `NCCL_DEBUG=INFO`, confirm that channels use
-`NET/RCCL-ANP/.../GDRDMA`. Set `NCCL_IB_DISABLE=1` only for a host-staged
-comparison. DCCS runs should set `FLUX_NCCL_DMABUF_ENABLE=0`,
-`NCCL_SOCKET_IFNAME=fenic`, and `GLOO_SOCKET_IFNAME=fenic`.
+`/dev/infiniband` exist. Prefer nodes with `iommu=pt` in `/proc/cmdline`;
+without it RCCL emits a stability warning, but the qualified DMA-BUF path has
+also completed GDRDMA training on nodes that lack it. With `NCCL_DEBUG=INFO`,
+confirm that channels use
+`NET/RCCL-ANP/.../GDRDMA` and rings report `GDR 1`. The qualified cluster
+overrides are:
+
+| Cluster | Socket interface | DMA-BUF | Notes |
+|---|---|---:|---|
+| Crusoe | `ens3` | `1` (default) | RCCL-ANP; `NCCL_NET_GDR_LEVEL=SYS`, `NCCL_NET_GDR_READ=1` |
+| DCCS | `fenic` | `0` | Set `NCCL_DMABUF_ENABLE=0` and both socket-interface variables |
+
+Set `NCCL_IB_DISABLE=1` only for a host-staged comparison. Pass the cluster
+overrides to every per-node command when launching through separate
+allocations or direct SSH.
 
 Common failures:
 
 - `expected GBS`: allocation size does not match the selected profile.
 - Rendezvous timeout: a rank is missing/duplicated or cannot reach rank 0.
+- `Missing "iommu=pt"`: prefer another node when available; this warning alone
+  does not mean the DMA-BUF GDR path failed.
 - Docker name conflict: remove the stale container or set `CONTAINER_NAME`.
 - Empty/invalid cache metadata: rebuild the cache locally; do not share a
   writable cache directory across ranks.
