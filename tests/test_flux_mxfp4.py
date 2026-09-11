@@ -413,6 +413,19 @@ def test_mxfp4_under80_profile_is_frozen():
     assert result.stdout == "mxfp8 double_all e4m3 7168 10009 "
 
 
+def test_mxfp4_pareto_b_profile_uses_qualified_e2e_controls():
+    command = (
+        "source examples/mlperf/flux1/config_4n_gbs1024_mxfp4_pareto_b.sh; "
+        "printf '%s ' \"$FSDP2_HSDP_FP8_ALL_REDUCE\" "
+        "\"$FSDP2_HSDP_FP8_BLOCK_SIZE\" \"$FSDP2_HSDP_FP8_MIN_NUMEL\" "
+        "\"$MLPERF_VALIDATION_START_STEP\""
+    )
+    result = subprocess.run(
+        ["bash", "-c", command], check=True, capture_output=True, text=True
+    )
+    assert result.stdout == "e4m3 0 1048576 0 "
+
+
 def test_mxfp4_capture_dir_is_defaulted_after_output_dir(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()

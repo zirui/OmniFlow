@@ -71,11 +71,16 @@ The qualified `pareto_a` and `pareto_b` recipes remain fixed: `pareto_a` has
 76 BF16 and 152 MXFP8 forward linears; `pareto_b` has 19 BF16, 38 MXFP4, and
 171 MXFP8 forward linears. The `custom` recipe is an experimental composition
 surface. All three keep MXFP4 backward on all 228 selected block linears and
-require the pinned image and AITER preshuffle backend.
+require the pinned image and AITER preshuffle backend. Pareto B also fixes
+Tensor-scale E4M3 HSDP reduction for tensors with at least 1,048,576 elements.
+A research run with its exact per-rank cache, seed 10007, and non-compliant
+validation suppression reached `0.585409 @ step 9216` in **83.111 min** (E2E
+1892.48 samples/s, steady median 1933.64 samples/s). It is useful as a throughput
+baseline but is not a valid Closed-division result.
 
-### Qualified sub-80-minute profile
+### Sub-80-minute research profile
 
-`config_4n_gbs1024_mxfp4_under80.sh` is the performance-qualified extension of
+`config_4n_gbs1024_mxfp4_under80.sh` is the performance-study extension of
 Pareto A: all 152 double-block Linear modules use BF16 forward, the 76
 single-block Linear modules use MXFP8 forward, and all 228 backward paths remain
 MXFP4. It uses tensor-scale E4M3 HSDP gradient AllReduce, seed 10009, delayed
@@ -90,8 +95,11 @@ FLUX_CONFIG=config_4n_gbs1024_mxfp4_under80.sh \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
-The exact cache is mandatory for the qualified timing and must be rebuilt after
-any image, graph, shape, or compiler change.
+The exact cache is mandatory for reproducing the timing and must be rebuilt
+after any image, graph, shape, or compiler change. This profile delays the first
+validation until step 7168, so it does not satisfy the Closed-division rule that
+FLUX quality be evaluated every 262,144 training samples. Use it only for
+research comparisons, not as an MLPerf submission recipe.
 
 ### Custom MXFP4 options
 
