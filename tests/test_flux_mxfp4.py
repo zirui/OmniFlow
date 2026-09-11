@@ -368,17 +368,24 @@ def test_mxfp4_eval_bf16_bypasses_strategy_and_gradient_sr_reaches_training(monk
 
 
 @pytest.mark.parametrize("profile", ["pareto_a", "pareto_b", "custom", "under80"])
-def test_mxfp4_profiles_use_mixed_quant_image(profile):
+def test_mxfp4_profiles_use_required_runtime(profile):
     env = os.environ.copy()
     env.pop("DOCKER_IMAGE", None)
+    env.pop("PRIMUS_TURBO_GEMM_BACKEND", None)
+    env.pop("PRIMUS_TURBO_AUTO_TUNE", None)
     command = (
         f"source examples/mlperf/flux1/config_4n_gbs1024_mxfp4_{profile}.sh; "
-        'printf "%s" "$DOCKER_IMAGE"'
+        'printf "%s\n%s\n%s" "$DOCKER_IMAGE" '
+        '"$PRIMUS_TURBO_GEMM_BACKEND" "$PRIMUS_TURBO_AUTO_TUNE"'
     )
     result = subprocess.run(
         ["bash", "-c", command], check=True, capture_output=True, text=True, env=env
     )
-    assert result.stdout == "zirui3/primus-v26.3-flux:v0.4-mxfp4-mixed-quant-uos"
+    assert result.stdout.splitlines() == [
+        "zirui3/primus-v26.3-flux:v0.4-mxfp4-mixed-quant-uos",
+        "FP4:AITER",
+        "0",
+    ]
 
 
 @pytest.mark.parametrize("profile", ["pareto_a", "pareto_b"])
