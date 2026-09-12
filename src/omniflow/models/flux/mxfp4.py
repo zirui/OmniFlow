@@ -37,6 +37,21 @@ def _quantize_mxfp4_dual(
     shuffle_colwise_scale: bool,
     shuffle_colwise: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if os.getenv("FLUX_MXFP4_FLYDSL_QUANT", "0") == "1" and not any(
+        (shuffle_rowwise_scale, shuffle_rowwise, shuffle_colwise_scale, shuffle_colwise)
+    ):
+        from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import flydsl_dual_quant
+
+        return flydsl_dual_quant(
+            x,
+            _FP4_DTYPE,
+            rowwise_use_rht,
+            colwise_use_rht,
+            row_2d=rowwise_use_2d_block,
+            col_2d=colwise_use_2d_block,
+            row_sr=rowwise_use_sr,
+            col_sr=colwise_use_sr,
+        )
     return torch.ops.primus_turbo_cpp_extension.quantize_mxfp4_dual(
         x,
         _FP4_DTYPE,
@@ -610,6 +625,7 @@ class MXFP4Linear(torch.nn.Module):
         linear: torch.nn.Linear,
         forward_precision: str,
         *,
+        preshuffle: bool = True,
         forward_hadamard: bool = False,
         activation_residual_mode: int = 0,
         eval_bf16: bool = False,
@@ -622,6 +638,7 @@ class MXFP4Linear(torch.nn.Module):
         self.weight = linear.weight
         self.bias = linear.bias
         self.forward_precision = forward_precision
+        self.preshuffle = preshuffle
         self.forward_hadamard = forward_hadamard
         self.activation_residual_mode = activation_residual_mode
         self.eval_bf16 = eval_bf16
@@ -642,7 +659,7 @@ class MXFP4Linear(torch.nn.Module):
             result = function.apply(
                 input,
                 self.weight,
-                True,
+                self.preshuffle,
                 self.gradient_stochastic_rounding,
                 self.forward_hadamard,
                 self.activation_residual_mode,
@@ -650,7 +667,7 @@ class MXFP4Linear(torch.nn.Module):
             output = result[0]
         else:
             result = function.apply(
-                input, self.weight, True, self.gradient_stochastic_rounding
+                input, self.weight, self.preshuffle, self.gradient_stochastic_rounding
             )
             output = result[0] if self.forward_precision == "mxfp8" else result
         if self.bias is not None:

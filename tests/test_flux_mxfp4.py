@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import importlib
 import os
 import subprocess
@@ -337,6 +338,24 @@ def test_mxfp4_forward_healing_is_one_time_and_keeps_backward_precision(monkeypa
     assert module.activation_residual_mode == 0
 
 
+def test_mxfp4_linear_forwards_backend_layout(monkeypatch):
+    mxfp4 = _load_mxfp4(monkeypatch)
+    calls = []
+
+    class FakeMXFP8Forward:
+        @staticmethod
+        def apply(*args):
+            calls.append(args)
+            marker = torch.empty(0, dtype=torch.uint8)
+            return torch.nn.functional.linear(args[0], args[1]), marker, marker, marker, marker
+
+    monkeypatch.setitem(mxfp4._FORWARD_FUNCTIONS, "mxfp8", FakeMXFP8Forward)
+    module = mxfp4.MXFP4Linear(torch.nn.Linear(4, 3), "mxfp8", preshuffle=False)
+    module(torch.randn(2, 4))
+
+    assert calls[0][2] is False
+
+
 def test_mxfp4_eval_bf16_bypasses_strategy_and_gradient_sr_reaches_training(monkeypatch):
     mxfp4 = _load_mxfp4(monkeypatch)
     calls = []
@@ -413,17 +432,47 @@ def test_mxfp4_under80_profile_is_frozen():
     assert result.stdout == "mxfp8 double_all e4m3 7168 10009 "
 
 
+def test_mxfp4_pareto_b_flydsl_profile_selects_unshuffled_kernels():
+    command = (
+        "source examples/mlperf/flux1/config_4n_gbs1024_mxfp4_pareto_b_flydsl.sh; "
+        'printf "%s %s %s" "$PRIMUS_TURBO_GEMM_BACKEND" '
+        '"$PRIMUS_TURBO_AUTO_TUNE" "$FLUX_MXFP4_FLYDSL_QUANT"'
+    )
+    result = subprocess.run(
+        ["bash", "-c", command], check=True, capture_output=True, text=True
+    )
+    assert result.stdout == "FP4:FLYDSL 1 1"
+
+
 def test_mxfp4_pareto_b_profile_uses_qualified_e2e_controls():
     command = (
         "source examples/mlperf/flux1/config_4n_gbs1024_mxfp4_pareto_b.sh; "
         "printf '%s ' \"$FSDP2_HSDP_FP8_ALL_REDUCE\" "
         "\"$FSDP2_HSDP_FP8_BLOCK_SIZE\" \"$FSDP2_HSDP_FP8_MIN_NUMEL\" "
-        "\"$MLPERF_VALIDATION_START_STEP\""
+        "\"$MLPERF_VALIDATION_START_STEP\" \"$AITER_CONFIG_GEMM_A4W4\""
     )
     result = subprocess.run(
         ["bash", "-c", command], check=True, capture_output=True, text=True
     )
-    assert result.stdout == "e4m3 0 1048576 0 "
+    assert result.stdout == (
+        "e4m3 0 1048576 0 "
+        "/workspace/OmniFlow/examples/mlperf/flux1/mxfp4_pareto_b_aiter_gemm.csv "
+    )
+
+
+def test_mxfp4_pareto_b_aiter_table_is_complete_and_exact():
+    path = "examples/mlperf/flux1/mxfp4_pareto_b_aiter_gemm.csv"
+    with open(path, newline="") as file:
+        rows = list(csv.DictReader(file))
+
+    assert len(rows) == 12
+    assert len({(row["M"], row["N"], row["K"]) for row in rows}) == 12
+    assert all(
+        row["cu_num"] == "256"
+        and row["splitK"] == "0"
+        and float(row["errRatio"]) == 0
+        for row in rows
+    )
 
 
 def test_mxfp4_capture_dir_is_defaulted_after_output_dir(tmp_path):

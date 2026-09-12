@@ -850,7 +850,7 @@ def test_flux_mxfp4_all_committed_residual_scopes_resolve():
 )
 def test_flux_mxfp4_recipes_replace_only_block_linears(monkeypatch, recipe, expected):
     backend = types.ModuleType("primus_turbo.pytorch.core.backend")
-    backend.BackendType = types.SimpleNamespace(AITER="aiter")
+    backend.BackendType = types.SimpleNamespace(AITER="aiter", FLYDSL="flydsl")
     backend.PrecisionType = types.SimpleNamespace(FP4="fp4")
     backend.GlobalBackendManager = types.SimpleNamespace(
         get_gemm_backend=lambda precision: "aiter",

@@ -73,6 +73,24 @@ The qualified `pareto_a` and `pareto_b` recipes remain fixed: `pareto_a` has
 surface. All three keep MXFP4 backward on all 228 selected block linears and
 require the pinned image and AITER preshuffle backend. Pareto B also fixes
 Tensor-scale E4M3 HSDP reduction for tensors with at least 1,048,576 elements.
+Pareto B also selects `mxfp4_pareto_b_aiter_gemm.csv`, which contains 12
+shape-specific AITER A4W4 configs generated serially on a 256-CU MI355X with
+image `sha256:4508b59cfa1b6f286a821e98ff995ea7a89b902ba99748fddb8bae61700affe5`.
+The source tuner output is archived at
+`/shared_nfs/zirui/runs/mxfp4_pareto_b_aiter_tune_serial_20260911T142417Z`;
+the checked-in CSV is byte-identical to `tuned.csv`. Every selected kernel
+passed the tuner reference check with zero reported error. Two same-node
+160-step A/B pairs measured aggregate median
+throughput of 61.8631 versus 61.4989 samples/GPU/s (**+0.59%**); this is a small
+kernel improvement, not the remaining TTQ solution.
+
+`config_4n_gbs1024_mxfp4_pareto_b_flydsl.sh` keeps the Pareto-B math but uses
+unshuffled FlyDSL FP4 GEMMs and the bit-exact FlyDSL dual quantizer. A matched
+4-node short run reached `63.34 samples/GPU/s`, versus `62.38` with the C++
+dual quantizer. A compliant seed-10007 run without the FlyDSL quantizer crossed
+at step 8704 in 77.75 minutes; the FlyDSL quantizer still requires a complete
+convergence qualification and does not by itself close the 70-minute gap.
+
 A research run with its exact per-rank cache, seed 10007, and non-compliant
 validation suppression reached `0.585409 @ step 9216` in **83.111 min** (E2E
 1892.48 samples/s, steady median 1933.64 samples/s). It is useful as a throughput

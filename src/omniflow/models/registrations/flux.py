@@ -641,11 +641,13 @@ def build_flux_model(model_config: dict[str, Any]):
 
         backend = GlobalBackendManager.get_gemm_backend(PrecisionType.FP4)
         backend = getattr(backend, "backend", backend)
-        preshuffle = backend == BackendType.AITER and not GlobalBackendManager.auto_tune_enabled()
-        if not preshuffle:
+        preshuffle = backend == BackendType.AITER
+        if backend not in {BackendType.AITER, BackendType.FLYDSL} or (
+            preshuffle and GlobalBackendManager.auto_tune_enabled()
+        ):
             raise RuntimeError(
-                "FLUX MXFP4 recipes require PRIMUS_TURBO_GEMM_BACKEND=FP4:AITER "
-                "and PRIMUS_TURBO_AUTO_TUNE=0"
+                "FLUX MXFP4 recipes require FP4:AITER with auto-tune disabled "
+                "or FP4:FLYDSL"
             )
 
         precision_counts = {"bf16": 0, "mxfp4": 0, "mxfp8": 0}
@@ -664,6 +666,7 @@ def build_flux_model(model_config: dict[str, Any]):
                 MXFP4Linear(
                     module,
                     forward_precision,
+                    preshuffle=preshuffle,
                     forward_hadamard=forward_hadamard,
                     activation_residual_mode=residual_mode,
                     eval_bf16=mxfp4_eval_precision == "bf16",
