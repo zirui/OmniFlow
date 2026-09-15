@@ -70,6 +70,57 @@ concurrently, replace `spur run ... env` with `ssh <node> env`, and keep the
 same rendezvous values plus one unique contiguous `NODE_RANK` per node. Use
 only nodes owned by the current allocation.
 
+## Direct SSH across four nodes (DCCS / Crusoe)
+
+Use this path when the four nodes are already available but are not in one
+scheduler allocation. Run one `run_with_docker.sh` over SSH per node; do not
+try to span the nodes with one `srun`. Use only nodes allocated to you or
+explicitly shared by their owner.
+
+Set `REPO`, `DATA_ROOT`, and `OUTPUT_ROOT` to shared `/perf_apps` paths on DCCS
+or shared `/shared_nfs` paths on Crusoe, then edit only the node list:
+
+```bash
+nodes=(node0 node1 node2 node3)
+MASTER_ADDR=$(getent ahostsv4 "${nodes[0]}" | awk 'NR == 1 {print $1}')
+MASTER_PORT=${MASTER_PORT:-29601}
+mkdir -p "$OUTPUT_ROOT/ssh-launch"
+
+SITE_ENV= # Crusoe defaults
+if [[ ${nodes[0]} == smci355-* ]]; then
+  SITE_ENV='NCCL_DMABUF_ENABLE=0 NCCL_SOCKET_IFNAME=fenic GLOO_SOCKET_IFNAME=fenic'
+fi
+
+pids=()
+for rank in "${!nodes[@]}"; do
+  node=${nodes[$rank]}
+  ssh "$node" "cd '$REPO' && env $SITE_ENV \
+    DATA_ROOT='$DATA_ROOT' OUTPUT_ROOT='$OUTPUT_ROOT' \
+    FLUX_CONFIG=config_4n_gbs1024.sh NNODES=4 NODE_RANK=$rank \
+    MASTER_ADDR='$MASTER_ADDR' MASTER_PORT='$MASTER_PORT' \
+    CONTAINER_NAME=omniflow-flux-4n-$rank \
+    bash examples/mlperf/flux1/run_with_docker.sh" \
+    >"$OUTPUT_ROOT/ssh-launch/$node.log" 2>&1 &
+  pids+=("$!")
+done
+rc=0
+for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+exit "$rc"
+```
+
+Add recipe overrides (image, FP8/MXFP4 settings, cache, smoke-test limits, and
+so on) beside `FLUX_CONFIG` so every rank receives the same values. Choose a
+fresh `MASTER_PORT` and unique container-name prefix for concurrent runs.
+
+On Crusoe, first configure job-scoped SSH for every owning allocation with
+`scripts/spur-ssh --setup-only JOB_ID` from the xutils checkout; then verify
+`ssh NODE hostname` for all four nodes. On DCCS, direct compute-node SSH is
+intended only after the nodes have been allocated or explicitly shared.
+
+Monitor with `tail -f "$OUTPUT_ROOT/ssh-launch/"*.log`. To stop a run, kill
+only the four `omniflow-flux-4n-*` containers; do not cancel a shared
+allocation.
+
 ## Inductor cache
 
 Do not let all ranks populate one writable NFS cache. Prewarm one GPU, then use
