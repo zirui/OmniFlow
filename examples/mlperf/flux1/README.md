@@ -162,3 +162,28 @@ only to test another compatible image.
 
 See [README-dev.md](README-dev.md) for rendezvous, cache prewarming, and
 multi-allocation operation.
+
+## Cached max-autotune
+
+Generate one node-local cache per allocation node before training. The setup
+supports 1-node, 2-node, and 4-node allocations:
+
+```bash
+ALLOCATION_JOB_ID=<job-id> DATA_ROOT=/path/to/data \
+OUTPUT_ROOT=/shared/path/to/output \
+bash examples/mlperf/flux1/setup_max_autotune_cache.sh
+```
+
+Then reuse the same `OUTPUT_ROOT` for training:
+
+```bash
+FLUX_CONFIG=config_4n_gbs1024.sh \
+TORCHINDUCTOR_CACHE_SEED=/output/cache-node%r.tar.zst \
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/shared/path/to/output \
+bash examples/mlperf/flux1/run_with_docker_slurm.sh
+```
+
+The launcher mounts host `OUTPUT_ROOT` at `/output` in the container, so
+`/output/cache-node%r.tar.zst` maps to `$OUTPUT_ROOT/cache-node%r.tar.zst`;
+`%r` is the node rank. Rebuild caches after changing the image, compiler, model
+graph, batch shapes, or compile options.
