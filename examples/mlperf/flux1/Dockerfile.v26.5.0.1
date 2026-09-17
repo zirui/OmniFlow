@@ -1,0 +1,139 @@
+FROM rocm/primus@sha256:3040bf42974d791dd42de2e36b3c919a00869a5754cfc57a06b96d004c55eed1 AS runtime-base
+
+ARG PRIMUS_TURBO_REVISION=bad914fcc0d4fab9ab9d7710e754471bc2801f2e
+
+# Overlay the PR 505 Python package while retaining the base image's compiled extensions.
+RUN git clone --filter=blob:none --no-checkout https://github.com/AMD-AGI/Primus-Turbo.git /tmp/Primus-Turbo && \
+    git -C /tmp/Primus-Turbo checkout "${PRIMUS_TURBO_REVISION}" && \
+    cp -a /tmp/Primus-Turbo/primus_turbo/. /opt/venv/lib/python3.12/site-packages/primus_turbo/ && \
+    rm -rf /tmp/Primus-Turbo
+
+# Remove ATen/hipBLASLt only from FP8 scaled-GEMM autotuning. Other GEMM
+# families retain their normal ATen and Triton choices.
+RUN python - <<'PY'
+from pathlib import Path
+
+path = Path("/opt/venv/lib/python3.12/site-packages/torch/_inductor/kernel/mm.py")
+source = path.read_text()
+source = source.replace("import logging\n", "import logging\nimport os\n", 1)
+old = """    if use_aten_gemm_kernels():
+        templates_to_use.append(aten__fp8_mm)
+"""
+new = """    selective_triton = os.environ.get("PRIMUS_FLUX_FP8_GEMM_BACKEND") == "triton_scaled_mm"
+    if use_aten_gemm_kernels() and not selective_triton:
+        templates_to_use.append(aten__fp8_mm)
+"""
+assert source.count(old) == 1
+path.write_text(source.replace(old, new) + "\n_PRIMUS_FLUX_TRITON_SCALED_MM = True\n")
+PY
+
+RUN python - <<'PY'
+from importlib.metadata import version
+
+import torch
+import torch._inductor.kernel.mm as mm
+from primus_turbo.flydsl.gemm.gemm_fp8_kernel import gemm_fp8_tensorwise_flydsl_kernel
+
+assert torch.__version__ == "2.12.0+rocm7.15.0a20260720", torch.__version__
+assert torch.version.hip == "7.15.0", torch.version.hip
+assert version("flydsl") == "0.2.4", version("flydsl")
+assert mm._PRIMUS_FLUX_TRITON_SCALED_MM
+assert gemm_fp8_tensorwise_flydsl_kernel
+PY
+
+FROM runtime-base AS rocm-builder
+
+ARG ROCM_LIBRARIES_REVISION=bc358d85daebc21cb5a032f04c8da9a5dc24d46e
+ARG RCCL_SOURCE_REVISION=e964ac61db658415c6d84f3742f4252b4f7727fa
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libboost-dev libfmt-dev libgmock-dev libgtest-dev libmsgpack-dev libzstd-dev python3-venv && \
+    ln -sfn "${ROCM_PATH}" /opt/rocm && \
+    git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git /tmp/rocm-libraries && \
+    git -C /tmp/rocm-libraries sparse-checkout set projects/hipblaslt shared/origami shared/rocroller shared/stinkytofu && \
+    git -C /tmp/rocm-libraries checkout "${ROCM_LIBRARIES_REVISION}" && \
+    cd /tmp/rocm-libraries/projects/hipblaslt && \
+    ./install.sh -a gfx950 -j 16
+
+RUN git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-systems.git /tmp/rocm-systems && \
+    git -C /tmp/rocm-systems sparse-checkout set projects/rccl && \
+    git -C /tmp/rocm-systems checkout "${RCCL_SOURCE_REVISION}" && \
+    cd /tmp/rocm-systems/projects/rccl && \
+    ./install.sh --amdgpu_targets=gfx950 -j 16 --prefix=/tmp/rccl-install
+
+FROM rocm-builder AS anp-builder
+
+ARG AMD_ANP_REVISION=306d9080595454e6ff5106c2bba796326ca3d5cf
+
+RUN git clone --filter=blob:none https://github.com/ROCm/amd-anp.git /tmp/amd-anp && \
+    git -C /tmp/amd-anp checkout "${AMD_ANP_REVISION}" && \
+    sed -i \
+        -e 's/-D__HIP_PLATFORM_AMD__/-D__HIP_PLATFORM_AMD__ -DNCCL_OS_LINUX -DHIP_FABRIC_API -DAMDSMI_FABRIC_DIRECT=1/' \
+        -e '/^OBJS =/i\SRCS += $(RCCL_BUILD)/hipify/src/os/linux.cc\nSRCS += $(RCCL_HOME)/src/misc/kernel_config.cc\nSRCS += $(RCCL_HOME)/src/param/param.cc\nSRCS += $(RCCL_HOME)/src/param/param_registry.cc' \
+        /tmp/amd-anp/Makefile && \
+    sed -i \
+        -e '/^ncclResult_t anpNetInit/ c\ncclResult_t anpNetInit(void** ctx, uint64_t commId, ncclNetCommConfig_t* config, ncclDebugLogger_t logFunction, ncclProfilerCallback_t profFunction) { (void)commId; (void)config; *ctx = nullptr;' \
+        -e '/^ncclResult_t anpNetListen/ c\ncclResult_t anpNetListen(void* ctx, int dev, void* opaqueHandle, void** listenComm) { (void)ctx;' \
+        -e '/^ncclResult_t anpNetConnect/ c\ncclResult_t anpNetConnect(void* ctx, int dev, void* opaqueHandle, void** sendComm, ncclNetDeviceHandle_t** ncclNetCtxt) { (void)ctx; ncclNetCommConfig_t* config = nullptr;' \
+        -e 's/sizeof(int), hipDeviceMalloc/sizeof(int), nullptr, ncclMemPersist, hipDeviceMalloc/g' \
+        -e 's/ncclCudaFree(commDev->gpuFlush.gpuFlushGpuMem)/ncclCudaFree(commDev->gpuFlush.gpuFlushGpuMem, nullptr)/g' \
+        -e '/^\/\/ Define the plugin/a\ncclResult_t ncclInitEnv() { return ncclSuccess; }\nconst char* ncclEnvPluginGetEnv(const char* name) { return getenv(name); }\nbool ncclEnvPluginInitialized() { return false; }\nint ncclParamSetCpuStackSize() { return 0; }\nncclResult_t anpNetFinalize(void* ctx) { (void)ctx; return ncclSuccess; }' \
+        -e '/    .makeVDevice = anpNetMakeVDevice,/a\    .finalize = anpNetFinalize,' \
+        /tmp/amd-anp/src/net_ib.cc && \
+    sed -i \
+        -e '/^static inline ncclResult_t wrap_ibv_create_ah/i\extern "C" struct ibv_ah* ibv_create_ah(struct ibv_pd*, struct ibv_ah_attr*);\nextern "C" int ibv_destroy_ah(struct ibv_ah*);' \
+        -e 's/pd->context->ops.create_ah(pd, attr)/ibv_create_ah(pd, attr)/' \
+        -e 's/ah->context->ops.destroy_ah(ah)/ibv_destroy_ah(ah)/' \
+        /tmp/rocm-systems/projects/rccl/build/release/hipify/src/include/ibvwrap.h && \
+    CPLUS_INCLUDE_PATH=/tmp/rocm-systems/projects/rccl/src/include/nccl_device \
+    make -C /tmp/amd-anp -j 16 \
+        RCCL_HOME=/tmp/rocm-systems/projects/rccl \
+        RCCL_BUILD=/tmp/rocm-systems/projects/rccl/build/release \
+        ROCM_PATH="${ROCM_PATH}"
+
+FROM runtime-base
+
+COPY --from=rocm-builder /tmp/rocm-libraries/projects/hipblaslt/hipblaslt-install/ ${ROCM_PATH}/
+COPY --from=rocm-builder /tmp/rccl-install/ ${ROCM_PATH}/
+COPY --from=anp-builder /tmp/amd-anp/build/librccl-anp.so ${ROCM_PATH}/lib/librccl-anp.so
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends zstd && \
+    rm -rf /var/lib/apt/lists/*
+
+# Reject invalid mixed-order reduction fusion candidates instead of aborting compilation.
+RUN python - <<'PY'
+from pathlib import Path
+
+path = Path("/opt/venv/lib/python3.12/site-packages/torch/_inductor/scheduler.py")
+source = path.read_text()
+old = """        else:
+            # Start parallel compilation for all three kernels
+            future_and_mod_l1 = self.compile_kernel(node_list_1)
+            future_and_mod_l2 = self.compile_kernel(node_list_2)
+            future_and_mod_l1_fused = self.compile_kernel(node_list_fused)
+"""
+new = """        else:
+            # Some mixed-order reductions pass the structural fusion checks but
+            # cannot share a Triton iteration group. Keep them unfused.
+            try:
+                future_and_mod_l1 = self.compile_kernel(node_list_1)
+                future_and_mod_l2 = self.compile_kernel(node_list_2)
+                future_and_mod_l1_fused = self.compile_kernel(node_list_fused)
+            except NotImplementedError as error:
+                if \"unexpected group:\" not in str(error):
+                    raise
+                why(str(error))
+                return FusionResult.fuse(False)
+"""
+assert source.count(old) == 1
+path.write_text(source.replace(old, new))
+PY
+
+RUN test -s "${ROCM_PATH}/lib/libhipblaslt.so" && \
+    grep -q '#define NCCL_VERSION_CODE' "${ROCM_PATH}/include/nccl.h" && \
+    nm -D "${ROCM_PATH}/lib/librccl-anp.so" | grep -q ' ncclNetPlugin_v12' && \
+    ! ldd "${ROCM_PATH}/lib/librccl-anp.so" | grep -q 'not found' && \
+    python -c 'import ctypes, os; ctypes.CDLL(os.environ["ROCM_PATH"] + "/lib/librccl-anp.so", mode=os.RTLD_NOW)'
+
+CMD ["/usr/bin/bash"]

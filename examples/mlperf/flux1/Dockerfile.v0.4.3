@@ -1,0 +1,39 @@
+FROM zirui3/primus-v26.3-flux@sha256:0abbf1666d415f1e1317cab4343426261c889f681816da3878c69dce73cc1ba8 AS base
+
+FROM base AS rocm-builder
+
+ARG ROCM_LIBRARIES_REVISION=1eb36d29ee99c8503565e0897ac74df289718699
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libboost-dev libfmt-dev libgmock-dev libgtest-dev libmsgpack-dev libzstd-dev python3-venv && \
+    ln -sfn "${ROCM_PATH}" /opt/rocm && \
+    git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git /tmp/rocm-libraries && \
+    git -C /tmp/rocm-libraries sparse-checkout set projects/hipblaslt shared/origami shared/rocroller shared/stinkytofu && \
+    git -C /tmp/rocm-libraries checkout "${ROCM_LIBRARIES_REVISION}" && \
+    cd /tmp/rocm-libraries/projects/hipblaslt && \
+    ./install.sh -a gfx950 -j 16
+
+FROM base AS runtime-base
+
+ARG PRIMUS_TURBO_REVISION=bad914fcc0d4fab9ab9d7710e754471bc2801f2e
+
+# Overlay the PR 505 Python package while retaining the compiled extensions.
+RUN git clone --filter=blob:none --no-checkout https://github.com/AMD-AGI/Primus-Turbo.git /tmp/Primus-Turbo && \
+    git -C /tmp/Primus-Turbo checkout "${PRIMUS_TURBO_REVISION}" && \
+    cp -a /tmp/Primus-Turbo/primus_turbo/. /opt/venv/lib/python3.12/site-packages/primus_turbo/ && \
+    rm -rf /tmp/Primus-Turbo
+
+FROM runtime-base
+
+COPY --from=rocm-builder /tmp/rocm-libraries/projects/hipblaslt/hipblaslt-install/ ${ROCM_PATH}/
+
+RUN test -s "${ROCM_PATH}/lib/libhipblaslt.so" && \
+    python - <<'PY'
+from primus_turbo.flydsl.gemm.gemm_fp8_kernel import gemm_fp8_tensorwise_flydsl_kernel
+from primus_turbo.flydsl.gemm.gemm_mxfp8_kernel import gemm_mxfp8_flydsl_kernel
+
+assert gemm_fp8_tensorwise_flydsl_kernel
+assert gemm_mxfp8_flydsl_kernel
+PY
+
+CMD ["/usr/bin/bash"]
