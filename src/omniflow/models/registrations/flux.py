@@ -61,6 +61,11 @@ _FP8_SELECTIVE_GEMM_SHAPES = {
     (16384, 15360, 3072),
     (16384, 21504, 3072),
 }
+# Offline-tuned for hipBLASLt 1.4.1 on gfx950 (image v0.4.3).
+_FP8_HIPBLASLT_SOLUTIONS = {
+    ((16384, 3072, 21504), torch.float8_e5m2): 29220,
+    ((21504, 3072, 16384), torch.float8_e5m2): 29229,
+}
 
 
 @torch.library.custom_op("primus::flux_flydsl_scaled_mm", mutates_args=())
@@ -233,10 +238,11 @@ def build_flux_model(model_config: dict[str, Any]):
     if float8_recipe not in {"", "tensorwise"}:
         raise ValueError(f"Unsupported FLUX float8_recipe={float8_recipe!r}; expected null or 'tensorwise'")
     fp8_gemm_backend = str(cfg_dict.get("float8_gemm_backend") or "").strip().lower()
-    if fp8_gemm_backend not in {"", "selective_triton", "selective_flydsl"}:
+    if fp8_gemm_backend not in {"", "selective_triton", "selective_flydsl", "hipblaslt_fixed"}:
         raise ValueError(
             "Unsupported FLUX float8_gemm_backend="
-            f"{fp8_gemm_backend!r}; expected null, 'selective_triton', or 'selective_flydsl'"
+            f"{fp8_gemm_backend!r}; expected null, 'selective_triton', 'selective_flydsl', "
+            "or 'hipblaslt_fixed'"
         )
     if fp8_gemm_backend and not float8_recipe:
         raise ValueError("FLUX float8_gemm_backend requires float8_recipe='tensorwise'")
@@ -273,7 +279,9 @@ def build_flux_model(model_config: dict[str, Any]):
             raise ImportError("TorchAO is required for FLUX tensor-wise FP8 training") from exc
 
         if fp8_gemm_backend:
-            os.environ["PRIMUS_FLUX_FP8_GEMM_BACKEND"] = fp8_gemm_backend
+            os.environ["PRIMUS_FLUX_FP8_GEMM_BACKEND"] = (
+                "selective_flydsl" if fp8_gemm_backend == "hipblaslt_fixed" else fp8_gemm_backend
+            )
         else:
             os.environ.pop("PRIMUS_FLUX_FP8_GEMM_BACKEND", None)
 
@@ -284,12 +292,16 @@ def build_flux_model(model_config: dict[str, Any]):
                 raise RuntimeError("selective_triton requires the FLUX FP8 Inductor image patch")
             logger.info(f"Using Triton FP8 GEMM for shapes {sorted(_FP8_SELECTIVE_GEMM_SHAPES)}")
 
-        if fp8_gemm_backend == "selective_flydsl":
+        if fp8_gemm_backend in {"selective_flydsl", "hipblaslt_fixed"}:
             import torchao.float8.float8_ops as float8_ops
 
+            if fp8_gemm_backend == "hipblaslt_fixed":
+                from omniflow.models.registrations.hipblaslt_fixed import load_extension
+
+                load_extension()
             original_addmm = float8_ops.addmm_float8_unwrapped
 
-            def selective_flydsl_addmm(
+            def selective_addmm(
                 a_data,
                 a_scale,
                 b_data,
@@ -300,12 +312,14 @@ def build_flux_model(model_config: dict[str, Any]):
                 use_fast_accum=False,
             ):
                 shape = (a_data.shape[0], b_data.shape[1], a_data.shape[1])
-                if (
-                    shape in _FP8_SELECTIVE_GEMM_SHAPES
-                    and output_dtype == torch.bfloat16
-                    and output_scale is None
-                    and bias is None
-                ):
+                compatible = output_dtype == torch.bfloat16 and output_scale is None and bias is None
+                solution = _FP8_HIPBLASLT_SOLUTIONS.get((shape, a_data.dtype))
+                if fp8_gemm_backend == "hipblaslt_fixed" and compatible and solution is not None:
+                    inverse_scales = torch.stack((a_scale, b_scale)).reciprocal()
+                    return torch.ops.omniflow.flux_hipblaslt_scaled_mm.default(
+                        a_data, b_data, inverse_scales[0], inverse_scales[1], solution
+                    )
+                if compatible and shape in _FP8_SELECTIVE_GEMM_SHAPES:
                     return _flux_flydsl_scaled_mm(
                         a_data,
                         b_data,
@@ -323,8 +337,10 @@ def build_flux_model(model_config: dict[str, Any]):
                     use_fast_accum,
                 )
 
-            float8_ops.addmm_float8_unwrapped = selective_flydsl_addmm
+            float8_ops.addmm_float8_unwrapped = selective_addmm
             logger.info(f"Using FlyDSL FP8 GEMM for shapes {sorted(_FP8_SELECTIVE_GEMM_SHAPES)}")
+            if fp8_gemm_backend == "hipblaslt_fixed":
+                logger.info(f"Using fixed hipBLASLt solutions {_FP8_HIPBLASLT_SOLUTIONS}")
 
         fp8_all_gather = os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1"
         full_wgrad_fqns: list[str] = []
