@@ -312,6 +312,13 @@ class FSDP2Trainer(BaseWanTrainer):
             reshard_after_forward=reshard_after_forward,
             mp_policy=mp_policy,
         )
+        if os.getenv("FSDP2_FORCE_SUM", "0") == "1":
+            for module in wrap_root.modules():
+                setter = getattr(module, "set_force_sum_reduction_for_comms", None)
+                if callable(setter):
+                    setter(True)
+            if self.rank == 0:
+                logger.info("FSDP2: SUM collectives with explicit gradient averaging")
         if self.rank == 0:
             logger.info(
                 f"FSDP2: applied fully_shard to '{wrap_target or '<model>'}' "
