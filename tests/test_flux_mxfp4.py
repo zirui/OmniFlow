@@ -41,6 +41,10 @@ def test_mxfp4_quantizer_custom_ops_have_compile_schemas_and_fake_shapes(monkeyp
         "bool colwise_fp4_use_rht, bool shuffle_colwise_scale, bool shuffle_colwise) "
         "-> (Tensor, Tensor, Tensor, Tensor)"
     )
+    assert str(mxfp4._quantize_mxfp8_dual._schema) == (
+        "(Tensor x, bool rowwise_use_2d_block, bool colwise_use_2d_block) "
+        "-> (Tensor, Tensor, Tensor, Tensor)"
+    )
 
     from torch._subclasses.fake_tensor import FakeTensorMode
 
@@ -52,6 +56,13 @@ def test_mxfp4_quantizer_custom_ops_have_compile_schemas_and_fake_shapes(monkeyp
             ((96, 8), torch.float8_e8m0fnu),
             ((160, 64), torch.float4_e2m1fn_x2),
             ((256, 8), torch.float8_e8m0fnu),
+        ]
+        pure = mxfp4._quantize_mxfp8_dual(x, False, True)
+        assert [(tuple(t.shape), t.dtype) for t in pure] == [
+            ((96, 256), torch.float8_e4m3fn),
+            ((96, 8), torch.float8_e8m0fnu),
+            ((160, 128), torch.float8_e4m3fn),
+            ((160, 4), torch.float8_e8m0fnu),
         ]
         colwise = mxfp4._quantize_mxfp4_colwise(x, False, True, False, False)
         assert [(tuple(t.shape), t.dtype) for t in colwise] == [
@@ -167,6 +178,30 @@ def test_mxfp8_forward_saves_fused_colwise_outputs_for_backward(monkeypatch):
         torch.float4_e2m1fn_x2,
         torch.float8_e8m0fnu,
     ]
+
+
+def test_pure_mxfp8_linear_uses_pure_autograd_path(monkeypatch):
+    mxfp4 = _load_mxfp4(monkeypatch)
+    linear = torch.nn.Linear(4, 3)
+    module = mxfp4.MXFP4Linear(
+        linear,
+        "mxfp8",
+        backward_precision="mxfp8",
+    )
+    input = torch.randn(2, 5, 4)
+    calls = []
+
+    class FakePure:
+        @staticmethod
+        def apply(value, weight):
+            calls.append((value, weight))
+            return (torch.nn.functional.linear(value, weight),)
+
+    monkeypatch.setattr(mxfp4, "_MXFP8Pure", FakePure)
+    output = module(input)
+
+    assert calls == [(input, linear.weight)]
+    torch.testing.assert_close(output, torch.nn.functional.linear(input, linear.weight, linear.bias))
 
 
 def test_bf16_backward_only_quantizes_colwise_mxfp4(monkeypatch):
@@ -319,6 +354,16 @@ def test_mxfp4_trainer_heals_resumed_run_after_threshold_and_resets_dynamo(monke
     assert resets == [True]
 
 
+def test_mxfp8_backward_requires_mxfp8_forward(monkeypatch):
+    mxfp4 = _load_mxfp4(monkeypatch)
+    with pytest.raises(ValueError, match="MXFP8 backward requires MXFP8 forward"):
+        mxfp4.MXFP4Linear(
+            torch.nn.Linear(4, 3),
+            "mxfp4",
+            backward_precision="mxfp8",
+        )
+
+
 def test_mxfp4_forward_healing_is_one_time_and_keeps_backward_precision(monkeypatch):
     mxfp4 = _load_mxfp4(monkeypatch)
     module = mxfp4.MXFP4Linear(
@@ -411,6 +456,27 @@ def test_mxfp4_under80_profile_is_frozen():
         ["bash", "-c", command], check=True, capture_output=True, text=True
     )
     assert result.stdout == "mxfp8 double_all e4m3 7168 10009 "
+
+
+@pytest.mark.parametrize(
+    ("profile", "float8", "qkv_high_precision", "mxfp4", "forward", "backward"),
+    [
+        ("config_1n_gbs1024_fp8_pure.sh", "tensorwise", "false", "", "mxfp4", "mxfp4"),
+        ("config_1n_gbs1024_mxfp8_pure.sh", "", "true", "custom", "mxfp8", "mxfp8"),
+        ("config_4n_gbs1024_mxfp8_pure.sh", "", "true", "custom", "mxfp8", "mxfp8"),
+    ],
+)
+def test_pure_fp8_profiles(profile, float8, qkv_high_precision, mxfp4, forward, backward):
+    command = (
+        f"source examples/mlperf/flux1/{profile}; "
+        'printf "%s\\n" "$FLUX_FLOAT8_RECIPE" "$FLUX_FP8_QKV_WGRAD_HIGH_PRECISION" '
+        '"$FLUX_MXFP4_RECIPE" "$FLUX_MXFP4_FORWARD_PRECISION" '
+        '"$FLUX_MXFP4_BACKWARD_PRECISION"'
+    )
+    result = subprocess.run(
+        ["bash", "-c", command], check=True, capture_output=True, text=True
+    )
+    assert result.stdout.splitlines() == [float8, qkv_high_precision, mxfp4, forward, backward]
 
 
 def test_mxfp4_capture_dir_is_defaulted_after_output_dir(tmp_path):

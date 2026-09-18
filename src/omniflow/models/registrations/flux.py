@@ -418,6 +418,19 @@ def build_flux_model(model_config: dict[str, Any]):
     if float8_recipe and mxfp4_recipe:
         raise ValueError("FLUX float8_recipe and mxfp4_recipe are mutually exclusive")
 
+    fp8_qkv_high_precision_value = str(
+        cfg_dict.get("float8_qkv_wgrad_high_precision", True)
+    ).lower()
+    if float8_recipe and fp8_qkv_high_precision_value not in {"true", "false"}:
+        raise ValueError("FLUX float8_qkv_wgrad_high_precision must be boolean")
+    fp8_qkv_high_precision = fp8_qkv_high_precision_value == "true"
+
+    mxfp4_backward_precision = str(
+        cfg_dict.get("mxfp4_backward_precision", "mxfp4")
+    ).lower()
+    if mxfp4_recipe and mxfp4_backward_precision not in {"mxfp4", "mxfp8"}:
+        raise ValueError("FLUX mxfp4_backward_precision must be 'mxfp4' or 'mxfp8'")
+
     mxfp4_eval_precision = str(cfg_dict.get("mxfp4_eval_precision", "same")).lower()
     if mxfp4_recipe and mxfp4_eval_precision not in {"same", "bf16"}:
         raise ValueError("FLUX mxfp4_eval_precision must be 'same' or 'bf16'")
@@ -461,6 +474,13 @@ def build_flux_model(model_config: dict[str, Any]):
                     f"Unsupported FLUX MXFP4 custom {option}={mxfp4_options[option]!r}; "
                     f"expected one of {sorted(valid)}"
                 )
+    if mxfp4_backward_precision == "mxfp8" and (
+        mxfp4_recipe != "custom"
+        or mxfp4_options["base_precision"] != "mxfp8"
+        or mxfp4_options["bf16_scope"] != "none"
+        or mxfp4_options["selective_mxfp4_scope"] != "none"
+    ):
+        raise ValueError("MXFP8 backward requires an all-MXFP8 custom forward recipe")
     fp8_gemm_backend = str(cfg_dict.get("float8_gemm_backend") or "").strip().lower()
     if fp8_gemm_backend not in {"", "selective_triton", "selective_flydsl"}:
         raise ValueError(
@@ -598,15 +618,21 @@ def build_flux_model(model_config: dict[str, Any]):
                 enable_fsdp_float8_all_gather=fp8_all_gather,
             ),
         )
-        dit = convert_to_float8_training(
-            dit,
-            module_filter_fn=high_precision_wgrad_filter,
-            config=Float8LinearConfig(
+        qkv_config = Float8LinearConfig(
+            pad_inner_dim=False,
+            enable_fsdp_float8_all_gather=fp8_all_gather,
+        )
+        if fp8_qkv_high_precision:
+            qkv_config = Float8LinearConfig(
                 cast_config_input_for_grad_weight=CastConfig(scaling_type=ScalingType.DISABLED),
                 cast_config_grad_output_for_grad_weight=CastConfig(scaling_type=ScalingType.DISABLED),
                 pad_inner_dim=False,
                 enable_fsdp_float8_all_gather=fp8_all_gather,
-            ),
+            )
+        dit = convert_to_float8_training(
+            dit,
+            module_filter_fn=high_precision_wgrad_filter,
+            config=qkv_config,
         )
         expected_full_count = len(dit.double_blocks) * 6 + len(dit.single_blocks) * 2
         expected_high_precision_count = len(dit.double_blocks) * 2
@@ -620,11 +646,15 @@ def build_flux_model(model_config: dict[str, Any]):
                 f"{len(high_precision_wgrad_fqns)} high-precision-wgrad Linear modules; "
                 f"expected {expected_full_count} and {expected_high_precision_count}"
             )
+        fp8_wgrad_count = len(full_wgrad_fqns) + (
+            0 if fp8_qkv_high_precision else len(high_precision_wgrad_fqns)
+        )
+        high_precision_count = len(high_precision_wgrad_fqns) if fp8_qkv_high_precision else 0
         logger.info(
             "Enabled TorchAO dynamic tensor-wise FP8 for "
             f"{len(full_wgrad_fqns) + len(high_precision_wgrad_fqns)} FLUX block Linear modules; "
-            f"wgrad=FP8 for {len(full_wgrad_fqns)} and high precision for "
-            f"{len(high_precision_wgrad_fqns)} QKV modules"
+            f"wgrad=FP8 for {fp8_wgrad_count} and high precision for "
+            f"{high_precision_count} QKV modules"
         )
 
     if mxfp4_recipe:
@@ -664,6 +694,7 @@ def build_flux_model(model_config: dict[str, Any]):
                 MXFP4Linear(
                     module,
                     forward_precision,
+                    backward_precision=mxfp4_backward_precision,
                     forward_hadamard=forward_hadamard,
                     activation_residual_mode=residual_mode,
                     eval_bf16=mxfp4_eval_precision == "bf16",
@@ -694,7 +725,7 @@ def build_flux_model(model_config: dict[str, Any]):
                 )
         logger.info(
             f"Enabled FLUX MXFP4 {mxfp4_recipe}: forward={precision_counts}; "
-            "backward=MXFP4 for all selected modules"
+            f"backward={mxfp4_backward_precision.upper()} for all selected modules"
         )
 
     encoder_cfg = dict(model_config.get("encoder", {}) or cfg_dict.get("encoder", {}) or {})

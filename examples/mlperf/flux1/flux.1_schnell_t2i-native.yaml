@@ -5,8 +5,10 @@ model:
       trainable_modules: dit
       float8_recipe: ${FLUX_FLOAT8_RECIPE}
       float8_gemm_backend: ${FLUX_FP8_GEMM_BACKEND}
+      float8_qkv_wgrad_high_precision: ${FLUX_FP8_QKV_WGRAD_HIGH_PRECISION}
       mxfp4_recipe: ${FLUX_MXFP4_RECIPE}
       mxfp4_forward_precision: ${FLUX_MXFP4_FORWARD_PRECISION}
+      mxfp4_backward_precision: ${FLUX_MXFP4_BACKWARD_PRECISION}
       mxfp4_forward_hadamard: ${FLUX_MXFP4_FORWARD_HADAMARD}
       mxfp4_bf16_forward_scope: ${FLUX_MXFP4_BF16_FORWARD_SCOPE}
       mxfp4_selective_forward_scope: ${FLUX_MXFP4_SELECTIVE_FORWARD_SCOPE}

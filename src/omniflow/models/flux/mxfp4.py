@@ -234,6 +234,45 @@ _quantize_mxfp8_rowwise_mxfp4_colwise.register_autograd(
 )
 
 
+@torch.library.custom_op("omniflow::quantize_mxfp8_dual", mutates_args=(), device_types="cuda")
+def _quantize_mxfp8_dual(
+    x: torch.Tensor, rowwise_use_2d_block: bool, colwise_use_2d_block: bool
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return torch.ops.primus_turbo_cpp_extension.quantize_mxfp8_dual(
+        x,
+        _MXFP8_DTYPE,
+        _MXFP4_PADDING_ALIGN_SIZE,
+        rowwise_use_2d_block,
+        colwise_use_2d_block,
+        False,
+        False,
+        False,
+        False,
+    )
+
+
+@_quantize_mxfp8_dual.register_fake
+def _quantize_mxfp8_dual_fake(
+    x: torch.Tensor, rowwise_use_2d_block: bool, colwise_use_2d_block: bool
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    del rowwise_use_2d_block, colwise_use_2d_block
+    rows, columns = x.shape
+    rows_padded = _cdiv(rows, _MXFP4_PADDING_ALIGN_SIZE) * _MXFP4_PADDING_ALIGN_SIZE
+    columns_padded = _cdiv(columns, _MXFP4_PADDING_ALIGN_SIZE) * _MXFP4_PADDING_ALIGN_SIZE
+    return (
+        torch.empty(rows, columns_padded, dtype=_MXFP8_DTYPE, device=x.device),
+        torch.empty(rows, _cdiv(columns_padded, _MXFP4_BLOCK_SIZE), dtype=torch.float8_e8m0fnu, device=x.device),
+        torch.empty(columns, rows_padded, dtype=_MXFP8_DTYPE, device=x.device),
+        torch.empty(columns, _cdiv(rows_padded, _MXFP4_BLOCK_SIZE), dtype=torch.float8_e8m0fnu, device=x.device),
+    )
+
+
+_quantize_mxfp8_dual.register_autograd(
+    lambda ctx, *grads: (None,) * 3,
+    setup_context=lambda ctx, inputs, output: None,
+)
+
+
 @torch.library.custom_op("omniflow::quantize_mxfp8_rowwise", mutates_args=(), device_types="cuda")
 def _quantize_mxfp8_rowwise(
     x: torch.Tensor, use_2d_block: bool
@@ -505,6 +544,69 @@ class _MXFP8Forward(torch.autograd.Function):
         return grad_input, grad_weight, None, None
 
 
+class _MXFP8Pure(torch.autograd.Function):
+    @staticmethod
+    def forward(input, weight):
+        input_2d = input.reshape(-1, input.shape[-1])
+        a, a_scale, a_t, a_t_scale = _quantize_mxfp8_dual(input_2d, False, False)
+        b, b_scale, b_t, b_t_scale = _quantize_mxfp8_dual(weight, True, True)
+        output = gemm_fp8_impl(
+            a,
+            a_scale,
+            False,
+            b,
+            b_scale,
+            True,
+            input.dtype,
+            False,
+            granularity=_GRANULARITY,
+            default_backend=BackendType.FLYDSL.value,
+        )
+        return output, a_t, a_t_scale, b_t, b_t_scale
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        input, _ = inputs
+        ctx.out_dtype = input.dtype
+        ctx.orig_shape = input.shape
+        _, a_t, a_t_scale, b_t, b_t_scale = output
+        ctx.save_for_backward(a_t, a_t_scale, b_t, b_t_scale)
+        ctx.mark_non_differentiable(a_t, a_t_scale, b_t, b_t_scale)
+
+    @staticmethod
+    def backward(ctx, grad_output, *_):
+        a_t, a_t_scale, b_t, b_t_scale = ctx.saved_tensors
+        gradient_2d = grad_output.reshape(-1, grad_output.shape[-1]).contiguous()
+        g, g_scale, g_t, g_t_scale = _quantize_mxfp8_dual(
+            gradient_2d, False, False
+        )
+        grad_input = gemm_fp8_impl(
+            g,
+            g_scale,
+            False,
+            b_t,
+            b_t_scale,
+            True,
+            ctx.out_dtype,
+            False,
+            granularity=_GRANULARITY,
+            default_backend=BackendType.FLYDSL.value,
+        ).reshape(ctx.orig_shape)
+        grad_weight = gemm_fp8_impl(
+            g_t,
+            g_t_scale,
+            False,
+            a_t,
+            a_t_scale,
+            True,
+            ctx.out_dtype,
+            False,
+            granularity=_GRANULARITY,
+            default_backend=BackendType.FLYDSL.value,
+        )
+        return grad_input, grad_weight
+
+
 class _BF16Forward(torch.autograd.Function):
     @staticmethod
     def forward(input, weight, preshuffle, use_gradient_sr):
@@ -601,15 +703,14 @@ _capture_mxfp4_linear.register_autograd(
 
 
 class MXFP4Linear(torch.nn.Module):
-    """Linear with recipe-selected forward precision and MXFP4 backward."""
-
-    backward_precision = "mxfp4"
+    """Linear with recipe-selected forward and backward precision."""
 
     def __init__(
         self,
         linear: torch.nn.Linear,
         forward_precision: str,
         *,
+        backward_precision: str = "mxfp4",
         forward_hadamard: bool = False,
         activation_residual_mode: int = 0,
         eval_bf16: bool = False,
@@ -622,6 +723,11 @@ class MXFP4Linear(torch.nn.Module):
         self.weight = linear.weight
         self.bias = linear.bias
         self.forward_precision = forward_precision
+        if backward_precision not in {"mxfp4", "mxfp8"}:
+            raise ValueError(f"Unsupported backward precision: {backward_precision}")
+        if backward_precision == "mxfp8" and forward_precision != "mxfp8":
+            raise ValueError("MXFP8 backward requires MXFP8 forward")
+        self.backward_precision = backward_precision
         self.forward_hadamard = forward_hadamard
         self.activation_residual_mode = activation_residual_mode
         self.eval_bf16 = eval_bf16
@@ -637,8 +743,10 @@ class MXFP4Linear(torch.nn.Module):
         shape = input.shape[:-1]
         if self._capture_name:
             input = _capture_mxfp4_linear(input, self.weight, self._capture_name)
-        function = _FORWARD_FUNCTIONS[self.forward_precision]
-        if self.forward_precision == "mxfp4":
+        if self.backward_precision == "mxfp8":
+            output = _MXFP8Pure.apply(input, self.weight)[0]
+        elif self.forward_precision == "mxfp4":
+            function = _FORWARD_FUNCTIONS[self.forward_precision]
             result = function.apply(
                 input,
                 self.weight,
@@ -649,6 +757,7 @@ class MXFP4Linear(torch.nn.Module):
             )
             output = result[0]
         else:
+            function = _FORWARD_FUNCTIONS[self.forward_precision]
             result = function.apply(
                 input, self.weight, True, self.gradient_stochastic_rounding
             )

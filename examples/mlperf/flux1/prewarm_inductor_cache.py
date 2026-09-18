@@ -28,8 +28,14 @@ def main() -> None:
             "config": {
                 "float8_recipe": float8_recipe,
                 "float8_gemm_backend": os.environ.get("FLUX_FP8_GEMM_BACKEND", ""),
+                "float8_qkv_wgrad_high_precision": os.environ.get(
+                    "FLUX_FP8_QKV_WGRAD_HIGH_PRECISION", "true"
+                ),
                 "mxfp4_recipe": mxfp4_recipe,
                 "mxfp4_forward_precision": os.environ.get("FLUX_MXFP4_FORWARD_PRECISION", "mxfp4"),
+                "mxfp4_backward_precision": os.environ.get(
+                    "FLUX_MXFP4_BACKWARD_PRECISION", "mxfp4"
+                ),
                 "mxfp4_forward_hadamard": os.environ.get("FLUX_MXFP4_FORWARD_HADAMARD", "none"),
                 "mxfp4_bf16_forward_scope": os.environ.get("FLUX_MXFP4_BF16_FORWARD_SCOPE", "none"),
                 "mxfp4_selective_forward_scope": os.environ.get(
