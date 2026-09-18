@@ -20,7 +20,7 @@ The training launcher reuses the same OUTPUT_ROOT with:
   TORCHINDUCTOR_CACHE_SEED=/output/cache-node%r.tar.zst
 
 Optional environment variables:
-  DOCKER_IMAGE       Container image (default: zirui3/primus-v26.3-flux:v0.4)
+  DOCKER_IMAGE       Container image (default: zirui3/primus-v26.3-flux:v0.4.3)
   CACHE_BUILD_STEPS  Short-run steps used to finalize each cache (default: 20)
 EOF
 }
@@ -33,7 +33,7 @@ fi
 : "${DATA_ROOT:?Set DATA_ROOT to the MLPerf dataset root}"
 : "${OUTPUT_ROOT:?Set OUTPUT_ROOT to an empty shared directory}"
 
-DOCKER_IMAGE=${DOCKER_IMAGE:-zirui3/primus-v26.3-flux:v0.4}
+DOCKER_IMAGE=${DOCKER_IMAGE:-zirui3/primus-v26.3-flux:v0.4.3}
 CACHE_BUILD_STEPS=${CACHE_BUILD_STEPS:-20}
 
 if [[ -n "${ALLOCATION_JOB_ID:-}" ]]; then

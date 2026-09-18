@@ -5,7 +5,7 @@ CLI or Primus Python-package dependency.
 
 The qualified profiles target MI355X GPUs, tensorwise FP8, and the MLPerf
 validation-loss threshold `0.586`. The base image is
-`zirui3/primus-v26.3-flux:v0.4`; the DP32 PR492 run uses
+`zirui3/primus-v26.3-flux:v0.4.3`; the DP32 PR492 run uses
 `zirui3/primus-v26.3-flux:v0.4.1`.
 
 Both images provide the optional `primus_turbo` FlyDSL kernels; training still
@@ -96,3 +96,19 @@ The launcher mounts host `OUTPUT_ROOT` at `/output` in the container, so
 `/output/cache-node%r.tar.zst` maps to `$OUTPUT_ROOT/cache-node%r.tar.zst`;
 `%r` is the node rank. Rebuild caches after changing the image, compiler, model
 graph, batch shapes, or compile options.
+
+## One-node hipBLASLt tuning
+
+The GBS1024 one-node profile defaults to `hipblaslt_fixed`. It retains the eight
+qualified FlyDSL shapes and pins hipBLASLt 1.4.1 solutions for the two remaining
+large E5M2-by-E4M3 GEMMs, `(16384, 3072, 21504)` and
+`(21504, 3072, 16384)`. The extension rejects other hipBLASLt versions and GPU
+architectures because solution indices are build- and architecture-specific.
+Set `FLUX_FP8_GEMM_BACKEND=selective_flydsl` to run the untuned control.
+
+In isolated validation, the selected kernels were 7.2% and 9.1% faster than
+`at::_scaled_mm`. Matched 60-step GBS1024 runs on two allocated MI355X nodes
+measured the optimized profile at 62.35 and 63.46 samples/GPU/s. On the latter node, the
+original profile measured 54.76 samples/GPU/s over the same steady-state step
+window, a 15.9% end-to-end improvement. The one-node profile includes the
+qualified FSDP/RCCL scheduling settings used in that measurement.

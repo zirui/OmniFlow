@@ -6,7 +6,7 @@ Start from the OmniFlow repository root:
 REPO=/shared_nfs/zirui/code/OmniFlow
 DATA_ROOT=/shared_nfs/zirui/data
 OUTPUT_ROOT=/shared_nfs/zirui/runs/flux-$(date -u +%Y%m%dT%H%M%SZ)
-DOCKER_IMAGE=zirui3/primus-v26.3-flux:v0.4
+DOCKER_IMAGE=zirui3/primus-v26.3-flux:v0.4.3
 cd "$REPO"
 export DOCKER_IMAGE
 ```
