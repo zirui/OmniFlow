@@ -214,7 +214,14 @@ def test_pure_mxfp8_reuses_gathered_rowwise_weight(monkeypatch):
     input = torch.randn(2, 4)
     qdata = torch.zeros(3, 128, dtype=torch.float8_e4m3fn)
     scale = torch.zeros(3, 4, dtype=torch.uint8).view(torch.float8_e8m0fnu)
-    weight = mxfp4.MXFP8GatheredWeight(qdata, scale, (3, 4), torch.bfloat16)
+    weight = mxfp4.MXFP8GatheredWeight(
+        qdata,
+        scale,
+        torch.zeros(4, 3, dtype=torch.float8_e4m3fn),
+        torch.zeros(4, 1, dtype=torch.uint8).view(torch.float8_e8m0fnu),
+        (3, 4),
+        torch.bfloat16,
+    )
     calls = []
 
     def dual(value, row_2d, col_2d):
@@ -222,16 +229,6 @@ def test_pure_mxfp8_reuses_gathered_rowwise_weight(monkeypatch):
         return value, torch.empty(0), value.T.contiguous(), torch.empty(0)
 
     monkeypatch.setattr(mxfp4, "_quantize_mxfp8_dual", dual)
-    monkeypatch.setattr(
-        mxfp4,
-        "_dequantize_mxfp8_rowwise",
-        lambda q, s, dtype: torch.ones(3, 128, dtype=dtype),
-    )
-    monkeypatch.setattr(
-        mxfp4,
-        "_quantize_mxfp8_colwise",
-        lambda value, use_2d: (value.T.contiguous(), torch.empty(0)),
-    )
     monkeypatch.setattr(
         mxfp4,
         "gemm_fp8_impl",
@@ -405,39 +402,43 @@ def test_mxfp8_backward_requires_mxfp8_forward(monkeypatch):
 
 def test_mxfp8_fsdp_weight_hooks_transport_bytes_and_restore_bf16(monkeypatch):
     mxfp4 = _load_mxfp4(monkeypatch)
-    weight = torch.randn(4, 32)
+    weight = torch.randn(128, 32)
     wrapped = mxfp4.MXFP8FSDPWeight(weight, 32)
 
     def quantize(value, use_2d):
-        assert value.shape == (4, 32)
+        assert value.shape == (128, 32)
         assert value.dtype == torch.bfloat16
         assert use_2d is True
         return (
-            torch.zeros(4, 128, dtype=torch.float8_e4m3fn),
-            torch.zeros(4, 4, dtype=torch.uint8).view(torch.float8_e8m0fnu),
+            torch.zeros(128, 128, dtype=torch.float8_e4m3fn),
+            torch.zeros(128, 4, dtype=torch.uint8).view(torch.float8_e8m0fnu),
         )
 
     monkeypatch.setattr(mxfp4, "_quantize_mxfp8_rowwise", quantize)
     payloads, metadata = wrapped.fsdp_pre_all_gather(object())
-    assert [tensor.dtype for tensor in payloads] == [torch.uint8, torch.uint8]
+    assert [tensor.dtype for tensor in payloads] == [torch.uint8] * 2
     assert metadata == (32, 128, 4)
 
     gathered = (
-        torch.zeros(8, 128, dtype=torch.uint8),
-        torch.zeros(8, 4, dtype=torch.uint8),
+        torch.zeros(256, 128, dtype=torch.uint8),
+        torch.zeros(256, 4, dtype=torch.uint8),
     )
     output, inner = wrapped.fsdp_post_all_gather(
         gathered, metadata, torch.bfloat16
     )
     assert isinstance(output, mxfp4.MXFP8GatheredWeight)
-    assert output.logical_shape == (8, 32)
-    assert output.qdata.shape == (8, 128)
-    assert output.scale.shape == (8, 4)
+    assert output.logical_shape == (256, 32)
+    assert output.qdata.shape == (256, 128)
+    assert output.scale.shape == (256, 4)
+    assert output.qdata_t.shape == (128, 256)
+    assert output.scale_t.shape == (128, 8)
     assert inner == gathered
 
     out = mxfp4.MXFP8GatheredWeight(
         torch.empty_like(output.qdata),
         torch.empty_like(output.scale),
+        torch.empty_like(output.qdata_t),
+        torch.empty_like(output.scale_t),
         output.logical_shape,
         output.logical_dtype,
     )
@@ -446,6 +447,10 @@ def test_mxfp8_fsdp_weight_hooks_transport_bytes_and_restore_bf16(monkeypatch):
     ) is None
     assert out.qdata.data_ptr() == gathered[0].data_ptr()
     assert out.scale.data_ptr() == gathered[1].data_ptr()
+    assert out.qdata_t.shape == (128, 256)
+    assert out.scale_t.shape == (128, 8)
+    assert torch.count_nonzero(out.qdata_t.view(torch.uint8)) == 0
+    assert torch.count_nonzero(out.scale_t.view(torch.uint8)) == 0
 
 
 def test_mxfp8_all_gather_wraps_only_pure_mxfp8_weights(monkeypatch):
