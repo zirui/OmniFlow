@@ -769,7 +769,7 @@ class MXFP8GatheredWeight(torch.Tensor):
         dtype: torch.dtype,
         requires_grad: bool = False,
         *,
-        _payloads: Optional[list[torch.Tensor]] = None,
+        _aliases: Optional[list["MXFP8GatheredWeight"]] = None,
     ):
         return torch.Tensor._make_wrapper_subclass(
             cls,
@@ -790,28 +790,17 @@ class MXFP8GatheredWeight(torch.Tensor):
         dtype: torch.dtype,
         requires_grad: bool = False,
         *,
-        _payloads: Optional[list[torch.Tensor]] = None,
+        _aliases: Optional[list["MXFP8GatheredWeight"]] = None,
     ):
         del requires_grad
-        self._payloads = _payloads or [qdata, scale, qdata_t, scale_t]
+        self.qdata = qdata
+        self.scale = scale
+        self.qdata_t = qdata_t
+        self.scale_t = scale_t
+        self._aliases = _aliases if _aliases is not None else []
+        self._aliases.append(self)
         self.logical_shape = shape
         self.logical_dtype = dtype
-
-    @property
-    def qdata(self):
-        return self._payloads[0]
-
-    @property
-    def scale(self):
-        return self._payloads[1]
-
-    @property
-    def qdata_t(self):
-        return self._payloads[2]
-
-    @property
-    def scale_t(self):
-        return self._payloads[3]
 
     def __repr__(self):
         return (
@@ -850,7 +839,7 @@ class MXFP8GatheredWeight(torch.Tensor):
                 tensor.logical_shape,
                 tensor.logical_dtype,
                 False,
-                _payloads=tensor._payloads,
+                _aliases=tensor._aliases,
             )
         if func == torch.ops.aten.clone.default:
             return MXFP8GatheredWeight(
@@ -866,7 +855,7 @@ class MXFP8GatheredWeight(torch.Tensor):
             if tensor.qdata.numel() != tensor.numel():
                 raise RuntimeError("MXFP8 gathered weight views require an unpadded K dimension")
             qdata = func(tensor.qdata, *args[1:], **(kwargs or {}))
-            payloads = tensor._payloads if qdata.shape == tensor.qdata.shape else None
+            aliases = tensor._aliases if qdata.shape == tensor.qdata.shape else None
             return MXFP8GatheredWeight(
                 qdata,
                 tensor.scale,
@@ -875,7 +864,7 @@ class MXFP8GatheredWeight(torch.Tensor):
                 tuple(args[1]),
                 tensor.logical_dtype,
                 tensor.requires_grad,
-                _payloads=payloads,
+                _aliases=aliases,
             )
         if func == torch.ops.aten.select.int:
             data = _dequantize_mxfp8_rowwise(
@@ -973,9 +962,13 @@ class MXFP8FSDPWeight(torch.Tensor):
                 raise RuntimeError(
                     f"Expected MXFP8GatheredWeight AllGather output, got {type(target)}"
                 )
-            target._payloads[:] = [qdata, scale, qdata_t, scale_t]
-            target.logical_shape = shape
-            target.logical_dtype = param_dtype
+            for alias in target._aliases:
+                alias.qdata = qdata
+                alias.scale = scale
+                alias.qdata_t = qdata_t
+                alias.scale_t = scale_t
+                alias.logical_shape = shape
+                alias.logical_dtype = param_dtype
             return
         output = MXFP8GatheredWeight(
             qdata, scale, qdata_t, scale_t, shape, param_dtype
