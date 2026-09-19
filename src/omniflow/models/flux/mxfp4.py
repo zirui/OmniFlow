@@ -982,21 +982,11 @@ class MXFP8FSDPWeight(torch.Tensor):
                 if not any(alias is existing for existing in self._gathered_aliases):
                     self._gathered_aliases.append(alias)
             target._aliases = self._gathered_aliases
-            updates = (
-                ("qdata", qdata),
-                ("scale", scale),
-                ("qdata_t", qdata_t),
-                ("scale_t", scale_t),
-            )
-            for name, value in updates:
-                copied = set()
-                for alias in self._gathered_aliases:
-                    destination = getattr(alias, name)
-                    pointer = destination.data_ptr()
-                    if pointer != value.data_ptr() and pointer not in copied:
-                        destination.copy_(value)
-                        copied.add(pointer)
             for alias in self._gathered_aliases:
+                alias.qdata = qdata
+                alias.scale = scale
+                alias.qdata_t = qdata_t
+                alias.scale_t = scale_t
                 alias.logical_shape = shape
                 alias.logical_dtype = param_dtype
             return
