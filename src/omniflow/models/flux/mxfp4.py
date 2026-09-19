@@ -879,7 +879,12 @@ class MXFP8FSDPWeight(torch.Tensor):
     """FP32 master weight with MXFP8-only FSDP AllGather transport."""
 
     @staticmethod
-    def __new__(cls, tensor: torch.Tensor, columns: int):
+    def __new__(
+        cls,
+        tensor: torch.Tensor,
+        columns: int,
+        gathered_aliases: Optional[list[MXFP8GatheredWeight]] = None,
+    ):
         return torch.Tensor._make_wrapper_subclass(
             cls,
             tensor.size(),
@@ -893,18 +898,28 @@ class MXFP8FSDPWeight(torch.Tensor):
             requires_grad=tensor.requires_grad,
         )
 
-    def __init__(self, tensor: torch.Tensor, columns: int):
+    def __init__(
+        self,
+        tensor: torch.Tensor,
+        columns: int,
+        gathered_aliases: Optional[list[MXFP8GatheredWeight]] = None,
+    ):
         self._tensor = tensor
         self._columns = columns
+        self._gathered_aliases = (
+            gathered_aliases if gathered_aliases is not None else []
+        )
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
         columns: Optional[int] = None
+        gathered_aliases: Optional[list[MXFP8GatheredWeight]] = None
 
         def unwrap(tensor):
-            nonlocal columns
+            nonlocal columns, gathered_aliases
             if columns is None:
                 columns = tensor._columns
+                gathered_aliases = tensor._gathered_aliases
             return tensor._tensor
 
         args, kwargs = pytree.tree_map_only(
@@ -915,7 +930,7 @@ class MXFP8FSDPWeight(torch.Tensor):
             return output
         return pytree.tree_map_only(
             torch.Tensor,
-            lambda tensor: MXFP8FSDPWeight(tensor, columns),
+            lambda tensor: MXFP8FSDPWeight(tensor, columns, gathered_aliases),
             output,
         )
 
@@ -963,6 +978,10 @@ class MXFP8FSDPWeight(torch.Tensor):
                 raise RuntimeError(
                     f"Expected MXFP8GatheredWeight AllGather output, got {type(target)}"
                 )
+            for alias in target._aliases:
+                if not any(alias is existing for existing in self._gathered_aliases):
+                    self._gathered_aliases.append(alias)
+            target._aliases = self._gathered_aliases
             updates = (
                 ("qdata", qdata),
                 ("scale", scale),
@@ -971,18 +990,24 @@ class MXFP8FSDPWeight(torch.Tensor):
             )
             for name, value in updates:
                 copied = set()
-                for alias in target._aliases:
+                for alias in self._gathered_aliases:
                     destination = getattr(alias, name)
                     pointer = destination.data_ptr()
                     if pointer != value.data_ptr() and pointer not in copied:
                         destination.copy_(value)
                         copied.add(pointer)
-            for alias in target._aliases:
+            for alias in self._gathered_aliases:
                 alias.logical_shape = shape
                 alias.logical_dtype = param_dtype
             return
         output = MXFP8GatheredWeight(
-            qdata, scale, qdata_t, scale_t, shape, param_dtype
+            qdata,
+            scale,
+            qdata_t,
+            scale_t,
+            shape,
+            param_dtype,
+            _aliases=self._gathered_aliases,
         )
         return output, (qdata_bytes, scale_bytes)
 
