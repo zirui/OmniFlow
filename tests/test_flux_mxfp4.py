@@ -464,10 +464,12 @@ def test_mxfp8_fsdp_weight_hooks_transport_bytes_and_restore_bf16(monkeypatch):
     assert torch.count_nonzero(out.scale_t.view(torch.uint8)) == 0
 
     view = torch.as_strided(output, output.shape, output.stride())
+    clone = output.clone()
     updated = tuple(torch.ones_like(tensor) for tensor in gathered)
     wrapped.fsdp_post_all_gather(updated, metadata, torch.bfloat16, out=output)
-    assert torch.count_nonzero(view.qdata_t.view(torch.uint8)) == view.qdata_t.numel()
-    assert torch.count_nonzero(view.scale_t.view(torch.uint8)) == view.scale_t.numel()
+    for alias in (view, clone):
+        assert torch.count_nonzero(alias.qdata_t.view(torch.uint8)) == alias.qdata_t.numel()
+        assert torch.count_nonzero(alias.scale_t.view(torch.uint8)) == alias.scale_t.numel()
 
 
 def test_mxfp8_all_gather_wraps_only_pure_mxfp8_weights(monkeypatch):

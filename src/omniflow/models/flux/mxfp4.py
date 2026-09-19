@@ -843,13 +843,14 @@ class MXFP8GatheredWeight(torch.Tensor):
             )
         if func == torch.ops.aten.clone.default:
             return MXFP8GatheredWeight(
-                tensor.qdata.clone(),
-                tensor.scale.clone(),
-                tensor.qdata_t.clone(),
-                tensor.scale_t.clone(),
+                tensor.qdata,
+                tensor.scale,
+                tensor.qdata_t,
+                tensor.scale_t,
                 tensor.logical_shape,
                 tensor.logical_dtype,
                 tensor.requires_grad,
+                _aliases=tensor._aliases,
             )
         if func in {torch.ops.aten.view.default, torch.ops.aten.as_strided.default}:
             if tensor.qdata.numel() != tensor.numel():
