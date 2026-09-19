@@ -209,6 +209,40 @@ def test_pure_mxfp8_linear_uses_pure_autograd_path(monkeypatch):
     torch.testing.assert_close(output, torch.nn.functional.linear(input, linear.weight, linear.bias))
 
 
+def test_pure_mxfp8_reuses_gathered_rowwise_weight(monkeypatch):
+    mxfp4 = _load_mxfp4(monkeypatch)
+    input = torch.randn(2, 4)
+    qdata = torch.zeros(3, 128, dtype=torch.float8_e4m3fn)
+    scale = torch.zeros(3, 4, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+    weight = mxfp4.MXFP8GatheredWeight(qdata, scale, (3, 4), torch.bfloat16)
+    calls = []
+
+    def dual(value, row_2d, col_2d):
+        calls.append(("dual", value.shape))
+        return value, torch.empty(0), value.T.contiguous(), torch.empty(0)
+
+    monkeypatch.setattr(mxfp4, "_quantize_mxfp8_dual", dual)
+    monkeypatch.setattr(
+        mxfp4,
+        "_dequantize_mxfp8_rowwise",
+        lambda q, s, dtype: torch.ones(3, 128, dtype=dtype),
+    )
+    monkeypatch.setattr(
+        mxfp4,
+        "_quantize_mxfp8_colwise",
+        lambda value, use_2d: (value.T.contiguous(), torch.empty(0)),
+    )
+    monkeypatch.setattr(
+        mxfp4,
+        "gemm_fp8_impl",
+        lambda a, a_scale, trans_a, b, b_scale, trans_b, *args, **kwargs: torch.zeros(2, 3),
+    )
+
+    output = mxfp4._MXFP8Pure.forward(input, weight)
+    assert output[0].shape == (2, 3)
+    assert calls == [("dual", torch.Size([2, 4]))]
+
+
 def test_bf16_backward_only_quantizes_colwise_mxfp4(monkeypatch):
     mxfp4 = _load_mxfp4(monkeypatch)
     input = torch.randn(2, 4, requires_grad=True)
@@ -392,26 +426,26 @@ def test_mxfp8_fsdp_weight_hooks_transport_bytes_and_restore_bf16(monkeypatch):
         torch.zeros(8, 128, dtype=torch.uint8),
         torch.zeros(8, 4, dtype=torch.uint8),
     )
-    restored = torch.arange(8 * 128, dtype=torch.bfloat16).reshape(8, 128)
-    monkeypatch.setattr(
-        mxfp4,
-        "_dequantize_mxfp8_rowwise",
-        lambda qdata, scale, dtype: restored.to(dtype),
-    )
     output, inner = wrapped.fsdp_post_all_gather(
         gathered, metadata, torch.bfloat16
     )
-    torch.testing.assert_close(output, restored[:, :32])
+    assert isinstance(output, mxfp4.MXFP8GatheredWeight)
+    assert output.logical_shape == (8, 32)
+    assert output.qdata.shape == (8, 128)
+    assert output.scale.shape == (8, 4)
     assert inner == gathered
 
-    out = torch.empty_like(output)
-    assert (
-        wrapped.fsdp_post_all_gather(
-            gathered, metadata, torch.bfloat16, out=out
-        )
-        is None
+    out = mxfp4.MXFP8GatheredWeight(
+        torch.empty_like(output.qdata),
+        torch.empty_like(output.scale),
+        output.logical_shape,
+        output.logical_dtype,
     )
-    torch.testing.assert_close(out, restored[:, :32])
+    assert wrapped.fsdp_post_all_gather(
+        gathered, metadata, torch.bfloat16, out=out
+    ) is None
+    assert out.qdata.data_ptr() == gathered[0].data_ptr()
+    assert out.scale.data_ptr() == gathered[1].data_ptr()
 
 
 def test_mxfp8_all_gather_wraps_only_pure_mxfp8_weights(monkeypatch):

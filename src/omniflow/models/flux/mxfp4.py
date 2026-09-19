@@ -310,6 +310,39 @@ _quantize_mxfp8_rowwise.register_autograd(
 )
 
 
+@torch.library.custom_op("omniflow::quantize_mxfp8_colwise", mutates_args=(), device_types="cuda")
+def _quantize_mxfp8_colwise(
+    x: torch.Tensor, use_2d_block: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.primus_turbo_cpp_extension.quantize_mxfp8(
+        x, _MXFP8_DTYPE, 0, _MXFP4_PADDING_ALIGN_SIZE, use_2d_block, False, False
+    )
+
+
+@_quantize_mxfp8_colwise.register_fake
+def _quantize_mxfp8_colwise_fake(
+    x: torch.Tensor, use_2d_block: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del use_2d_block
+    rows, columns = x.shape
+    rows_padded = _cdiv(rows, _MXFP4_PADDING_ALIGN_SIZE) * _MXFP4_PADDING_ALIGN_SIZE
+    return (
+        torch.empty(columns, rows_padded, dtype=_MXFP8_DTYPE, device=x.device),
+        torch.empty(
+            columns,
+            _cdiv(rows_padded, _MXFP4_BLOCK_SIZE),
+            dtype=torch.float8_e8m0fnu,
+            device=x.device,
+        ),
+    )
+
+
+_quantize_mxfp8_colwise.register_autograd(
+    lambda ctx, *grads: (None, None),
+    setup_context=lambda ctx, inputs, output: None,
+)
+
+
 @torch.library.custom_op("omniflow::dequantize_mxfp8_rowwise", mutates_args=(), device_types="cuda")
 def _dequantize_mxfp8_rowwise(
     x: torch.Tensor, scale: torch.Tensor, out_dtype: torch.dtype
@@ -581,7 +614,16 @@ class _MXFP8Pure(torch.autograd.Function):
     def forward(input, weight):
         input_2d = input.reshape(-1, input.shape[-1])
         a, a_scale, a_t, a_t_scale = _quantize_mxfp8_dual(input_2d, False, False)
-        b, b_scale, b_t, b_t_scale = _quantize_mxfp8_dual(weight, True, True)
+        if isinstance(weight, MXFP8GatheredWeight):
+            b, b_scale = weight.qdata, weight.scale
+            weight_bf16 = _dequantize_mxfp8_rowwise(
+                b, b_scale, weight.logical_dtype
+            )[:, : weight.logical_shape[1]]
+            b_t, b_t_scale = _quantize_mxfp8_colwise(weight_bf16, True)
+        else:
+            b, b_scale, b_t, b_t_scale = _quantize_mxfp8_dual(
+                weight, True, True
+            )
         output = gemm_fp8_impl(
             a,
             a_scale,
@@ -748,6 +790,91 @@ _MXFP8_FSDP_PRESERVE_OPS = {
 }
 
 
+class MXFP8GatheredWeight(torch.Tensor):
+    """Logical BF16 weight backed by gathered rowwise MXFP8 data."""
+
+    @staticmethod
+    def __new__(
+        cls,
+        qdata: torch.Tensor,
+        scale: torch.Tensor,
+        shape: tuple[int, int],
+        dtype: torch.dtype,
+        requires_grad: bool = False,
+    ):
+        return torch.Tensor._make_wrapper_subclass(
+            cls,
+            shape,
+            strides=(shape[1], 1),
+            dtype=dtype,
+            device=qdata.device,
+            requires_grad=requires_grad,
+        )
+
+    def __init__(
+        self,
+        qdata: torch.Tensor,
+        scale: torch.Tensor,
+        shape: tuple[int, int],
+        dtype: torch.dtype,
+        requires_grad: bool = False,
+    ):
+        del requires_grad
+        self.qdata = qdata
+        self.scale = scale
+        self.logical_shape = shape
+        self.logical_dtype = dtype
+
+    def __tensor_flatten__(self):
+        return ["qdata", "scale"], {
+            "shape": self.logical_shape,
+            "dtype": self.logical_dtype,
+            "requires_grad": self.requires_grad,
+        }
+
+    @staticmethod
+    def __tensor_unflatten__(inner_tensors, metadata, outer_size, outer_stride):
+        return MXFP8GatheredWeight(
+            inner_tensors["qdata"],
+            inner_tensors["scale"],
+            metadata["shape"],
+            metadata["dtype"],
+            metadata["requires_grad"],
+        )
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args, kwargs=None):
+        tensor = args[0]
+        if func == torch.ops.aten.detach.default:
+            return MXFP8GatheredWeight(
+                tensor.qdata.detach(),
+                tensor.scale.detach(),
+                tensor.logical_shape,
+                tensor.logical_dtype,
+                False,
+            )
+        if func == torch.ops.aten.clone.default:
+            return MXFP8GatheredWeight(
+                tensor.qdata.clone(),
+                tensor.scale.clone(),
+                tensor.logical_shape,
+                tensor.logical_dtype,
+                tensor.requires_grad,
+            )
+        if func in {torch.ops.aten.view.default, torch.ops.aten.as_strided.default}:
+            if tensor.qdata.numel() != tensor.numel():
+                raise RuntimeError("MXFP8 gathered weight views require an unpadded K dimension")
+            qdata = func(tensor.qdata, *args[1:], **(kwargs or {}))
+            return MXFP8GatheredWeight(
+                qdata,
+                tensor.scale,
+                tuple(args[1]),
+                tensor.logical_dtype,
+                tensor.requires_grad,
+            )
+        raise NotImplementedError(f"MXFP8 gathered weight does not support {func}")
+
+
 class MXFP8FSDPWeight(torch.Tensor):
     """FP32 master weight with MXFP8-only FSDP AllGather transport."""
 
@@ -817,20 +944,25 @@ class MXFP8FSDPWeight(torch.Tensor):
         columns, padded_columns, scale_columns = metadata
         qdata = qdata_bytes.view(_MXFP8_DTYPE).reshape(-1, padded_columns)
         scale = scale_bytes.view(torch.float8_e8m0fnu).reshape(-1, scale_columns)
-        weight = _dequantize_mxfp8_rowwise(qdata, scale, param_dtype)[:, :columns]
+        shape = (qdata.shape[0], columns)
         if out is not None:
             from torch.distributed._tensor import DTensor
 
             target = out._local_tensor if isinstance(out, DTensor) else out
-            if isinstance(target, MXFP8FSDPWeight):
-                target = target._tensor
-            with torch.no_grad():
-                target.copy_(weight.reshape(target.shape))
+            if not isinstance(target, MXFP8GatheredWeight):
+                raise RuntimeError(
+                    f"Expected MXFP8GatheredWeight AllGather output, got {type(target)}"
+                )
+            target.qdata = qdata
+            target.scale = scale
+            target.logical_shape = shape
+            target.logical_dtype = param_dtype
             return
-        return weight, (qdata_bytes, scale_bytes)
+        output = MXFP8GatheredWeight(qdata, scale, shape, param_dtype)
+        return output, (qdata_bytes, scale_bytes)
 
 
-torch.serialization.add_safe_globals([MXFP8FSDPWeight])
+torch.serialization.add_safe_globals([MXFP8FSDPWeight, MXFP8GatheredWeight])
 
 
 class MXFP4Linear(torch.nn.Module):
