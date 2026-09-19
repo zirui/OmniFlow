@@ -576,6 +576,7 @@ def test_mxfp4_under80_profile_is_frozen():
     ("profile", "float8", "qkv_high_precision", "mxfp4", "forward", "backward", "all_gather"),
     [
         ("config_1n_gbs1024_fp8_pure.sh", "tensorwise", "false", "", "mxfp4", "mxfp4", "0"),
+        ("config_4n_gbs1024_fp8_pure.sh", "tensorwise", "false", "", "mxfp4", "mxfp4", "0"),
         ("config_1n_gbs1024_mxfp8_pure.sh", "", "true", "custom", "mxfp8", "mxfp8", "0"),
         ("config_1n_gbs1024_mxfp8_pure_ag.sh", "", "true", "custom", "mxfp8", "mxfp8", "1"),
         ("config_4n_gbs1024_mxfp8_pure.sh", "", "true", "custom", "mxfp8", "mxfp8", "0"),
