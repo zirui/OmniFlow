@@ -310,6 +310,39 @@ _quantize_mxfp8_rowwise.register_autograd(
 )
 
 
+@torch.library.custom_op("omniflow::quantize_mxfp8_colwise", mutates_args=(), device_types="cuda")
+def _quantize_mxfp8_colwise(
+    x: torch.Tensor, use_2d_block: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.primus_turbo_cpp_extension.quantize_mxfp8(
+        x, _MXFP8_DTYPE, 0, _MXFP4_PADDING_ALIGN_SIZE, use_2d_block, False, False
+    )
+
+
+@_quantize_mxfp8_colwise.register_fake
+def _quantize_mxfp8_colwise_fake(
+    x: torch.Tensor, use_2d_block: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del use_2d_block
+    rows, columns = x.shape
+    rows_padded = _cdiv(rows, _MXFP4_PADDING_ALIGN_SIZE) * _MXFP4_PADDING_ALIGN_SIZE
+    return (
+        torch.empty(columns, rows_padded, dtype=_MXFP8_DTYPE, device=x.device),
+        torch.empty(
+            columns,
+            _cdiv(rows_padded, _MXFP4_BLOCK_SIZE),
+            dtype=torch.float8_e8m0fnu,
+            device=x.device,
+        ),
+    )
+
+
+_quantize_mxfp8_colwise.register_autograd(
+    lambda ctx, *grads: (None, None),
+    setup_context=lambda ctx, inputs, output: None,
+)
+
+
 @torch.library.custom_op("omniflow::dequantize_mxfp8_rowwise", mutates_args=(), device_types="cuda")
 def _dequantize_mxfp8_rowwise(
     x: torch.Tensor, scale: torch.Tensor, out_dtype: torch.dtype
@@ -583,7 +616,10 @@ class _MXFP8Pure(torch.autograd.Function):
         a, a_scale, a_t, a_t_scale = _quantize_mxfp8_dual(input_2d, False, False)
         if isinstance(weight, MXFP8GatheredWeight):
             b, b_scale = weight.qdata, weight.scale
-            b_t, b_t_scale = weight.qdata_t, weight.scale_t
+            weight_bf16 = _dequantize_mxfp8_rowwise(
+                b, b_scale, weight.logical_dtype
+            )[:, : weight.logical_shape[1]]
+            b_t, b_t_scale = _quantize_mxfp8_colwise(weight_bf16, True)
         else:
             b, b_scale, b_t, b_t_scale = _quantize_mxfp8_dual(
                 weight, True, True
@@ -755,15 +791,13 @@ _MXFP8_FSDP_PRESERVE_OPS = {
 
 
 class MXFP8GatheredWeight(torch.Tensor):
-    """Logical BF16 weight backed by gathered MXFP8 data in both orientations."""
+    """Logical BF16 weight backed by gathered rowwise MXFP8 data."""
 
     @staticmethod
     def __new__(
         cls,
         qdata: torch.Tensor,
         scale: torch.Tensor,
-        qdata_t: torch.Tensor,
-        scale_t: torch.Tensor,
         shape: tuple[int, int],
         dtype: torch.dtype,
         requires_grad: bool = False,
@@ -781,8 +815,6 @@ class MXFP8GatheredWeight(torch.Tensor):
         self,
         qdata: torch.Tensor,
         scale: torch.Tensor,
-        qdata_t: torch.Tensor,
-        scale_t: torch.Tensor,
         shape: tuple[int, int],
         dtype: torch.dtype,
         requires_grad: bool = False,
@@ -790,8 +822,6 @@ class MXFP8GatheredWeight(torch.Tensor):
         del requires_grad
         self.qdata = qdata
         self.scale = scale
-        self.qdata_t = qdata_t
-        self.scale_t = scale_t
         self.logical_shape = shape
         self.logical_dtype = dtype
 
@@ -802,7 +832,7 @@ class MXFP8GatheredWeight(torch.Tensor):
         )
 
     def __tensor_flatten__(self):
-        return ["qdata", "scale", "qdata_t", "scale_t"], {
+        return ["qdata", "scale"], {
             "shape": self.logical_shape,
             "dtype": self.logical_dtype,
             "requires_grad": self.requires_grad,
@@ -813,8 +843,6 @@ class MXFP8GatheredWeight(torch.Tensor):
         return MXFP8GatheredWeight(
             inner_tensors["qdata"],
             inner_tensors["scale"],
-            inner_tensors["qdata_t"],
-            inner_tensors["scale_t"],
             metadata["shape"],
             metadata["dtype"],
             metadata["requires_grad"],
@@ -827,8 +855,6 @@ class MXFP8GatheredWeight(torch.Tensor):
             return MXFP8GatheredWeight(
                 tensor.qdata.detach(),
                 tensor.scale.detach(),
-                tensor.qdata_t.detach(),
-                tensor.scale_t.detach(),
                 tensor.logical_shape,
                 tensor.logical_dtype,
                 False,
@@ -837,8 +863,6 @@ class MXFP8GatheredWeight(torch.Tensor):
             return MXFP8GatheredWeight(
                 tensor.qdata.clone(),
                 tensor.scale.clone(),
-                tensor.qdata_t.clone(),
-                tensor.scale_t.clone(),
                 tensor.logical_shape,
                 tensor.logical_dtype,
                 tensor.requires_grad,
@@ -850,8 +874,6 @@ class MXFP8GatheredWeight(torch.Tensor):
             return MXFP8GatheredWeight(
                 qdata,
                 tensor.scale,
-                tensor.qdata_t,
-                tensor.scale_t,
                 tuple(args[1]),
                 tensor.logical_dtype,
                 tensor.requires_grad,
@@ -917,8 +939,6 @@ class MXFP8FSDPWeight(torch.Tensor):
 
     def fsdp_pre_all_gather(self, mesh):
         local_weight = self._tensor.reshape(-1, self._columns).to(torch.bfloat16)
-        if local_weight.shape[0] % _MXFP4_PADDING_ALIGN_SIZE:
-            raise ValueError("MXFP8 AllGather requires row shards aligned to 128")
         qdata, scale = _quantize_mxfp8_rowwise(local_weight, True)
         metadata = (self._columns, qdata.shape[1], scale.shape[1])
         return (qdata.view(torch.uint8), scale.view(torch.uint8)), metadata
@@ -935,10 +955,6 @@ class MXFP8FSDPWeight(torch.Tensor):
         columns, padded_columns, scale_columns = metadata
         qdata = qdata_bytes.view(_MXFP8_DTYPE).reshape(-1, padded_columns)
         scale = scale_bytes.view(torch.float8_e8m0fnu).reshape(-1, scale_columns)
-        qdata_t = qdata.T.contiguous()
-        scale_t = scale[::_MXFP4_BLOCK_SIZE].T.repeat_interleave(
-            _MXFP4_BLOCK_SIZE, dim=0
-        ).contiguous()
         shape = (qdata.shape[0], columns)
         if out is not None:
             from torch.distributed._tensor import DTensor
@@ -950,14 +966,10 @@ class MXFP8FSDPWeight(torch.Tensor):
                 )
             target.qdata = qdata
             target.scale = scale
-            target.qdata_t = qdata_t
-            target.scale_t = scale_t
             target.logical_shape = shape
             target.logical_dtype = param_dtype
             return
-        output = MXFP8GatheredWeight(
-            qdata, scale, qdata_t, scale_t, shape, param_dtype
-        )
+        output = MXFP8GatheredWeight(qdata, scale, shape, param_dtype)
         return output, (qdata_bytes, scale_bytes)
 
 
