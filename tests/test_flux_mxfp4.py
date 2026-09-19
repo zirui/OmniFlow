@@ -404,11 +404,11 @@ def test_mxfp8_backward_requires_mxfp8_forward(monkeypatch):
 
 def test_mxfp8_fsdp_weight_hooks_transport_bytes_and_restore_bf16(monkeypatch):
     mxfp4 = _load_mxfp4(monkeypatch)
-    weight = torch.randn(128, 32)
-    wrapped = mxfp4.MXFP8FSDPWeight(weight, 32)
+    weight = torch.randn(128, 128)
+    wrapped = mxfp4.MXFP8FSDPWeight(weight, 128)
 
     def quantize(value, use_2d):
-        assert value.shape == (128, 32)
+        assert value.shape == (128, 128)
         assert value.dtype == torch.bfloat16
         assert use_2d is True
         return (
@@ -425,7 +425,7 @@ def test_mxfp8_fsdp_weight_hooks_transport_bytes_and_restore_bf16(monkeypatch):
     )
     payloads, metadata = wrapped.fsdp_pre_all_gather(object())
     assert [tensor.dtype for tensor in payloads] == [torch.uint8] * 2
-    assert metadata == (32, 128, 4)
+    assert metadata == (128, 128, 4)
 
     gathered = (
         torch.zeros(256, 128, dtype=torch.uint8),
@@ -435,7 +435,7 @@ def test_mxfp8_fsdp_weight_hooks_transport_bytes_and_restore_bf16(monkeypatch):
         gathered, metadata, torch.bfloat16
     )
     assert isinstance(output, mxfp4.MXFP8GatheredWeight)
-    assert output.logical_shape == (256, 32)
+    assert output.logical_shape == (256, 128)
     assert output.qdata.shape == (256, 128)
     assert output.scale.shape == (256, 4)
     assert output.qdata_t.shape == (128, 256)
@@ -453,12 +453,18 @@ def test_mxfp8_fsdp_weight_hooks_transport_bytes_and_restore_bf16(monkeypatch):
     assert wrapped.fsdp_post_all_gather(
         gathered, metadata, torch.bfloat16, out=out
     ) is None
-    assert out.qdata.data_ptr() == gathered[0].data_ptr()
-    assert out.scale.data_ptr() == gathered[1].data_ptr()
+    assert torch.equal(out.qdata.view(torch.uint8), gathered[0])
+    assert torch.equal(out.scale.view(torch.uint8), gathered[1])
     assert out.qdata_t.shape == (128, 256)
     assert out.scale_t.shape == (128, 8)
     assert torch.count_nonzero(out.qdata_t.view(torch.uint8)) == 0
     assert torch.count_nonzero(out.scale_t.view(torch.uint8)) == 0
+
+    view = torch.as_strided(output, output.shape, output.stride())
+    updated = tuple(torch.ones_like(tensor) for tensor in gathered)
+    wrapped.fsdp_post_all_gather(updated, metadata, torch.bfloat16, out=output)
+    assert torch.count_nonzero(view.qdata_t.view(torch.uint8)) == view.qdata_t.numel()
+    assert torch.count_nonzero(view.scale_t.view(torch.uint8)) == view.scale_t.numel()
 
 
 def test_mxfp8_all_gather_wraps_only_pure_mxfp8_weights(monkeypatch):

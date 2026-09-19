@@ -949,10 +949,13 @@ class MXFP8FSDPWeight(torch.Tensor):
                 raise RuntimeError(
                     f"Expected MXFP8GatheredWeight AllGather output, got {type(target)}"
                 )
-            target.qdata = qdata
-            target.scale = scale
-            target.qdata_t = qdata_t
-            target.scale_t = scale_t
+            with torch.no_grad():
+                if target.qdata.data_ptr() != qdata.data_ptr():
+                    target.qdata.copy_(qdata)
+                if target.scale.data_ptr() != scale.data_ptr():
+                    target.scale.copy_(scale)
+                target.qdata_t.copy_(qdata_t)
+                target.scale_t.copy_(scale_t)
             target.logical_shape = shape
             target.logical_dtype = param_dtype
             return
