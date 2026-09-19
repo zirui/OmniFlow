@@ -825,6 +825,12 @@ class MXFP8GatheredWeight(torch.Tensor):
         self.logical_shape = shape
         self.logical_dtype = dtype
 
+    def __repr__(self):
+        return (
+            f"MXFP8GatheredWeight(shape={self.logical_shape}, "
+            f"dtype={self.logical_dtype}, device={self.device})"
+        )
+
     def __tensor_flatten__(self):
         return ["qdata", "scale"], {
             "shape": self.logical_shape,
@@ -872,6 +878,11 @@ class MXFP8GatheredWeight(torch.Tensor):
                 tensor.logical_dtype,
                 tensor.requires_grad,
             )
+        if func == torch.ops.aten.select.int:
+            data = _dequantize_mxfp8_rowwise(
+                tensor.qdata, tensor.scale, tensor.logical_dtype
+            )[:, : tensor.logical_shape[-1]]
+            return func(data, *args[1:], **(kwargs or {}))
         raise NotImplementedError(f"MXFP8 gathered weight does not support {func}")
 
 
