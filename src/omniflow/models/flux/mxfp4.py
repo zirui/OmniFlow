@@ -768,6 +768,8 @@ class MXFP8GatheredWeight(torch.Tensor):
         shape: tuple[int, int],
         dtype: torch.dtype,
         requires_grad: bool = False,
+        *,
+        _payloads: Optional[list[torch.Tensor]] = None,
     ):
         return torch.Tensor._make_wrapper_subclass(
             cls,
@@ -787,14 +789,29 @@ class MXFP8GatheredWeight(torch.Tensor):
         shape: tuple[int, int],
         dtype: torch.dtype,
         requires_grad: bool = False,
+        *,
+        _payloads: Optional[list[torch.Tensor]] = None,
     ):
         del requires_grad
-        self.qdata = qdata
-        self.scale = scale
-        self.qdata_t = qdata_t
-        self.scale_t = scale_t
+        self._payloads = _payloads or [qdata, scale, qdata_t, scale_t]
         self.logical_shape = shape
         self.logical_dtype = dtype
+
+    @property
+    def qdata(self):
+        return self._payloads[0]
+
+    @property
+    def scale(self):
+        return self._payloads[1]
+
+    @property
+    def qdata_t(self):
+        return self._payloads[2]
+
+    @property
+    def scale_t(self):
+        return self._payloads[3]
 
     def __repr__(self):
         return (
@@ -826,13 +843,14 @@ class MXFP8GatheredWeight(torch.Tensor):
         tensor = args[0]
         if func == torch.ops.aten.detach.default:
             return MXFP8GatheredWeight(
-                tensor.qdata.detach(),
-                tensor.scale.detach(),
-                tensor.qdata_t.detach(),
-                tensor.scale_t.detach(),
+                tensor.qdata,
+                tensor.scale,
+                tensor.qdata_t,
+                tensor.scale_t,
                 tensor.logical_shape,
                 tensor.logical_dtype,
                 False,
+                _payloads=tensor._payloads,
             )
         if func == torch.ops.aten.clone.default:
             return MXFP8GatheredWeight(
@@ -848,6 +866,7 @@ class MXFP8GatheredWeight(torch.Tensor):
             if tensor.qdata.numel() != tensor.numel():
                 raise RuntimeError("MXFP8 gathered weight views require an unpadded K dimension")
             qdata = func(tensor.qdata, *args[1:], **(kwargs or {}))
+            payloads = tensor._payloads if qdata.shape == tensor.qdata.shape else None
             return MXFP8GatheredWeight(
                 qdata,
                 tensor.scale,
@@ -856,6 +875,7 @@ class MXFP8GatheredWeight(torch.Tensor):
                 tuple(args[1]),
                 tensor.logical_dtype,
                 tensor.requires_grad,
+                _payloads=payloads,
             )
         if func == torch.ops.aten.select.int:
             data = _dequantize_mxfp8_rowwise(
@@ -921,8 +941,9 @@ class MXFP8FSDPWeight(torch.Tensor):
         if local_weight.shape[0] % _MXFP4_PADDING_ALIGN_SIZE:
             raise ValueError("MXFP8 AllGather requires row shards aligned to 128")
         qdata, scale = _quantize_mxfp8_rowwise(local_weight, True)
+        block_scale = scale[::_MXFP4_BLOCK_SIZE].contiguous()
         metadata = (self._columns, qdata.shape[1], scale.shape[1])
-        return (qdata.view(torch.uint8), scale.view(torch.uint8)), metadata
+        return (qdata.view(torch.uint8), block_scale.view(torch.uint8)), metadata
 
     def fsdp_post_all_gather(
         self,
@@ -935,9 +956,12 @@ class MXFP8FSDPWeight(torch.Tensor):
         qdata_bytes, scale_bytes = all_gather_outputs
         columns, padded_columns, scale_columns = metadata
         qdata = qdata_bytes.view(_MXFP8_DTYPE).reshape(-1, padded_columns)
-        scale = scale_bytes.view(torch.float8_e8m0fnu).reshape(-1, scale_columns)
+        block_scale = scale_bytes.view(torch.float8_e8m0fnu).reshape(
+            -1, scale_columns
+        )
+        scale = block_scale.repeat_interleave(_MXFP4_BLOCK_SIZE, dim=0)
         qdata_t = torch.ops.primus_turbo_cpp_extension.transpose_2d(qdata, -2, -1)
-        scale_t = scale[::_MXFP4_BLOCK_SIZE].T.repeat_interleave(
+        scale_t = block_scale.T.repeat_interleave(
             _MXFP4_BLOCK_SIZE, dim=0
         ).contiguous()
         shape = (qdata.shape[0], columns)
@@ -949,13 +973,7 @@ class MXFP8FSDPWeight(torch.Tensor):
                 raise RuntimeError(
                     f"Expected MXFP8GatheredWeight AllGather output, got {type(target)}"
                 )
-            with torch.no_grad():
-                if target.qdata.data_ptr() != qdata.data_ptr():
-                    target.qdata.copy_(qdata)
-                if target.scale.data_ptr() != scale.data_ptr():
-                    target.scale.copy_(scale)
-                target.qdata_t.copy_(qdata_t)
-                target.scale_t.copy_(scale_t)
+            target._payloads[:] = [qdata, scale, qdata_t, scale_t]
             target.logical_shape = shape
             target.logical_dtype = param_dtype
             return

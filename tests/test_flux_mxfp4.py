@@ -425,11 +425,12 @@ def test_mxfp8_fsdp_weight_hooks_transport_bytes_and_restore_bf16(monkeypatch):
     )
     payloads, metadata = wrapped.fsdp_pre_all_gather(object())
     assert [tensor.dtype for tensor in payloads] == [torch.uint8] * 2
+    assert [tensor.shape for tensor in payloads] == [(128, 128), (4, 4)]
     assert metadata == (128, 128, 4)
 
     gathered = (
         torch.zeros(256, 128, dtype=torch.uint8),
-        torch.zeros(256, 4, dtype=torch.uint8),
+        torch.zeros(8, 4, dtype=torch.uint8),
     )
     output, inner = wrapped.fsdp_post_all_gather(
         gathered, metadata, torch.bfloat16
@@ -454,7 +455,9 @@ def test_mxfp8_fsdp_weight_hooks_transport_bytes_and_restore_bf16(monkeypatch):
         gathered, metadata, torch.bfloat16, out=out
     ) is None
     assert torch.equal(out.qdata.view(torch.uint8), gathered[0])
-    assert torch.equal(out.scale.view(torch.uint8), gathered[1])
+    assert torch.equal(
+        out.scale.view(torch.uint8), gathered[1].repeat_interleave(32, dim=0)
+    )
     assert out.qdata_t.shape == (128, 256)
     assert out.scale_t.shape == (128, 8)
     assert torch.count_nonzero(out.qdata_t.view(torch.uint8)) == 0
