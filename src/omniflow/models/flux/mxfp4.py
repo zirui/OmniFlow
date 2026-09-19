@@ -935,7 +935,7 @@ class MXFP8FSDPWeight(torch.Tensor):
         columns, padded_columns, scale_columns = metadata
         qdata = qdata_bytes.view(_MXFP8_DTYPE).reshape(-1, padded_columns)
         scale = scale_bytes.view(torch.float8_e8m0fnu).reshape(-1, scale_columns)
-        qdata_t = qdata.T.contiguous()
+        qdata_t = qdata.T
         scale_t = scale[::_MXFP4_BLOCK_SIZE].T.repeat_interleave(
             _MXFP4_BLOCK_SIZE, dim=0
         ).contiguous()
