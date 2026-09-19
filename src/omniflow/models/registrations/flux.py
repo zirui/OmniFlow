@@ -430,6 +430,10 @@ def build_flux_model(model_config: dict[str, Any]):
     ).lower()
     if mxfp4_recipe and mxfp4_backward_precision not in {"mxfp4", "mxfp8"}:
         raise ValueError("FLUX mxfp4_backward_precision must be 'mxfp4' or 'mxfp8'")
+    mxfp8_all_gather_value = str(cfg_dict.get("mxfp8_all_gather", False)).lower()
+    if mxfp4_recipe and mxfp8_all_gather_value not in {"true", "false", "1", "0"}:
+        raise ValueError("FLUX mxfp8_all_gather must be boolean")
+    mxfp8_all_gather = mxfp8_all_gather_value in {"true", "1"}
 
     mxfp4_eval_precision = str(cfg_dict.get("mxfp4_eval_precision", "same")).lower()
     if mxfp4_recipe and mxfp4_eval_precision not in {"same", "bf16"}:
@@ -474,13 +478,16 @@ def build_flux_model(model_config: dict[str, Any]):
                     f"Unsupported FLUX MXFP4 custom {option}={mxfp4_options[option]!r}; "
                     f"expected one of {sorted(valid)}"
                 )
-    if mxfp4_backward_precision == "mxfp8" and (
-        mxfp4_recipe != "custom"
-        or mxfp4_options["base_precision"] != "mxfp8"
-        or mxfp4_options["bf16_scope"] != "none"
-        or mxfp4_options["selective_mxfp4_scope"] != "none"
-    ):
+    pure_mxfp8 = (
+        mxfp4_recipe == "custom"
+        and mxfp4_options["base_precision"] == "mxfp8"
+        and mxfp4_options["bf16_scope"] == "none"
+        and mxfp4_options["selective_mxfp4_scope"] == "none"
+    )
+    if mxfp4_backward_precision == "mxfp8" and not pure_mxfp8:
         raise ValueError("MXFP8 backward requires an all-MXFP8 custom forward recipe")
+    if mxfp8_all_gather and (not pure_mxfp8 or mxfp4_backward_precision != "mxfp8"):
+        raise ValueError("MXFP8 AllGather requires pure MXFP8 forward and backward")
     fp8_gemm_backend = str(cfg_dict.get("float8_gemm_backend") or "").strip().lower()
     if fp8_gemm_backend not in {"", "selective_triton", "selective_flydsl"}:
         raise ValueError(
@@ -695,6 +702,7 @@ def build_flux_model(model_config: dict[str, Any]):
                     module,
                     forward_precision,
                     backward_precision=mxfp4_backward_precision,
+                    mxfp8_all_gather=mxfp8_all_gather,
                     forward_hadamard=forward_hadamard,
                     activation_residual_mode=residual_mode,
                     eval_bf16=mxfp4_eval_precision == "bf16",
@@ -725,7 +733,8 @@ def build_flux_model(model_config: dict[str, Any]):
                 )
         logger.info(
             f"Enabled FLUX MXFP4 {mxfp4_recipe}: forward={precision_counts}; "
-            f"backward={mxfp4_backward_precision.upper()} for all selected modules"
+            f"backward={mxfp4_backward_precision.upper()} for all selected modules; "
+            f"MXFP8 AllGather={mxfp8_all_gather}"
         )
 
     encoder_cfg = dict(model_config.get("encoder", {}) or cfg_dict.get("encoder", {}) or {})

@@ -117,6 +117,8 @@ class FSDP2Trainer(BaseWanTrainer):
 
         if os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1" and self.rank == 0:
             logger.info("FSDP2: FP8 AllGather uses native one-byte transport")
+        if os.getenv("FLUX_MXFP8_ALL_GATHER", "0") == "1" and self.rank == 0:
+            logger.info("FSDP2: MXFP8 AllGather transports qdata and E8M0 scales")
 
         fp8_all_reduce = os.getenv("FSDP2_HSDP_FP8_ALL_REDUCE", "").lower()
         if fp8_all_reduce:

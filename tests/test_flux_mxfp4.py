@@ -25,7 +25,9 @@ def _load_mxfp4(monkeypatch):
     gemm_fp4.gemm_fp4_impl = lambda *args, **kwargs: None
     gemm_fp8 = types.ModuleType("primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl")
     gemm_fp8.gemm_fp8_impl = lambda *args, **kwargs: None
-    for module in (backend, low_precision, gemm_fp4, gemm_fp8):
+    quantization = types.ModuleType("primus_turbo.pytorch.ops.quantization")
+    quantization.dequantize_fp8 = lambda *args, **kwargs: None
+    for module in (backend, low_precision, gemm_fp4, gemm_fp8, quantization):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     return importlib.import_module("omniflow.models.flux.mxfp4")
 
@@ -44,6 +46,9 @@ def test_mxfp4_quantizer_custom_ops_have_compile_schemas_and_fake_shapes(monkeyp
     assert str(mxfp4._quantize_mxfp8_dual._schema) == (
         "(Tensor x, bool rowwise_use_2d_block, bool colwise_use_2d_block) "
         "-> (Tensor, Tensor, Tensor, Tensor)"
+    )
+    assert str(mxfp4._dequantize_mxfp8_rowwise._schema) == (
+        "(Tensor x, Tensor scale, ScalarType out_dtype) -> Tensor"
     )
 
     from torch._subclasses.fake_tensor import FakeTensorMode
@@ -364,6 +369,68 @@ def test_mxfp8_backward_requires_mxfp8_forward(monkeypatch):
         )
 
 
+def test_mxfp8_fsdp_weight_hooks_transport_bytes_and_restore_bf16(monkeypatch):
+    mxfp4 = _load_mxfp4(monkeypatch)
+    weight = torch.randn(4, 32)
+    wrapped = mxfp4.MXFP8FSDPWeight(weight, 32)
+
+    def quantize(value, use_2d):
+        assert value.shape == (4, 32)
+        assert value.dtype == torch.bfloat16
+        assert use_2d is True
+        return (
+            torch.zeros(4, 128, dtype=torch.float8_e4m3fn),
+            torch.zeros(4, 4, dtype=torch.uint8).view(torch.float8_e8m0fnu),
+        )
+
+    monkeypatch.setattr(mxfp4, "_quantize_mxfp8_rowwise", quantize)
+    payloads, metadata = wrapped.fsdp_pre_all_gather(object())
+    assert [tensor.dtype for tensor in payloads] == [torch.uint8, torch.uint8]
+    assert metadata == (32, 128, 4)
+
+    gathered = (
+        torch.zeros(8, 128, dtype=torch.uint8),
+        torch.zeros(8, 4, dtype=torch.uint8),
+    )
+    restored = torch.arange(8 * 128, dtype=torch.bfloat16).reshape(8, 128)
+    monkeypatch.setattr(
+        mxfp4,
+        "_dequantize_mxfp8_rowwise",
+        lambda qdata, scale, dtype: restored.to(dtype),
+    )
+    output, inner = wrapped.fsdp_post_all_gather(
+        gathered, metadata, torch.bfloat16
+    )
+    torch.testing.assert_close(output, restored[:, :32])
+    assert inner == gathered
+
+    out = torch.empty_like(output)
+    assert (
+        wrapped.fsdp_post_all_gather(
+            gathered, metadata, torch.bfloat16, out=out
+        )
+        is None
+    )
+    torch.testing.assert_close(out, restored[:, :32])
+
+
+def test_mxfp8_all_gather_wraps_only_pure_mxfp8_weights(monkeypatch):
+    mxfp4 = _load_mxfp4(monkeypatch)
+    module = mxfp4.MXFP4Linear(
+        torch.nn.Linear(32, 16),
+        "mxfp8",
+        backward_precision="mxfp8",
+        mxfp8_all_gather=True,
+    )
+    assert isinstance(module.weight, mxfp4.MXFP8FSDPWeight)
+    with pytest.raises(ValueError, match="requires pure MXFP8"):
+        mxfp4.MXFP4Linear(
+            torch.nn.Linear(32, 16),
+            "mxfp4",
+            mxfp8_all_gather=True,
+        )
+
+
 def test_mxfp4_forward_healing_is_one_time_and_keeps_backward_precision(monkeypatch):
     mxfp4 = _load_mxfp4(monkeypatch)
     module = mxfp4.MXFP4Linear(
@@ -459,24 +526,35 @@ def test_mxfp4_under80_profile_is_frozen():
 
 
 @pytest.mark.parametrize(
-    ("profile", "float8", "qkv_high_precision", "mxfp4", "forward", "backward"),
+    ("profile", "float8", "qkv_high_precision", "mxfp4", "forward", "backward", "all_gather"),
     [
-        ("config_1n_gbs1024_fp8_pure.sh", "tensorwise", "false", "", "mxfp4", "mxfp4"),
-        ("config_1n_gbs1024_mxfp8_pure.sh", "", "true", "custom", "mxfp8", "mxfp8"),
-        ("config_4n_gbs1024_mxfp8_pure.sh", "", "true", "custom", "mxfp8", "mxfp8"),
+        ("config_1n_gbs1024_fp8_pure.sh", "tensorwise", "false", "", "mxfp4", "mxfp4", "0"),
+        ("config_1n_gbs1024_mxfp8_pure.sh", "", "true", "custom", "mxfp8", "mxfp8", "0"),
+        ("config_1n_gbs1024_mxfp8_pure_ag.sh", "", "true", "custom", "mxfp8", "mxfp8", "1"),
+        ("config_4n_gbs1024_mxfp8_pure.sh", "", "true", "custom", "mxfp8", "mxfp8", "0"),
+        ("config_4n_gbs1024_mxfp8_pure_ag.sh", "", "true", "custom", "mxfp8", "mxfp8", "1"),
     ],
 )
-def test_pure_fp8_profiles(profile, float8, qkv_high_precision, mxfp4, forward, backward):
+def test_pure_fp8_profiles(
+    profile, float8, qkv_high_precision, mxfp4, forward, backward, all_gather
+):
     command = (
         f"source examples/mlperf/flux1/{profile}; "
         'printf "%s\\n" "$FLUX_FLOAT8_RECIPE" "$FLUX_FP8_QKV_WGRAD_HIGH_PRECISION" '
         '"$FLUX_MXFP4_RECIPE" "$FLUX_MXFP4_FORWARD_PRECISION" '
-        '"$FLUX_MXFP4_BACKWARD_PRECISION"'
+        '"$FLUX_MXFP4_BACKWARD_PRECISION" "$FLUX_MXFP8_ALL_GATHER"'
     )
     result = subprocess.run(
         ["bash", "-c", command], check=True, capture_output=True, text=True
     )
-    assert result.stdout.splitlines() == [float8, qkv_high_precision, mxfp4, forward, backward]
+    assert result.stdout.splitlines() == [
+        float8,
+        qkv_high_precision,
+        mxfp4,
+        forward,
+        backward,
+        all_gather,
+    ]
 
 
 def test_mxfp4_capture_dir_is_defaulted_after_output_dir(tmp_path):

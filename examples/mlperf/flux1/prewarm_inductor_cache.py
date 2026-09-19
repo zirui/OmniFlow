@@ -36,6 +36,7 @@ def main() -> None:
                 "mxfp4_backward_precision": os.environ.get(
                     "FLUX_MXFP4_BACKWARD_PRECISION", "mxfp4"
                 ),
+                "mxfp8_all_gather": os.environ.get("FLUX_MXFP8_ALL_GATHER", "0"),
                 "mxfp4_forward_hadamard": os.environ.get("FLUX_MXFP4_FORWARD_HADAMARD", "none"),
                 "mxfp4_bf16_forward_scope": os.environ.get("FLUX_MXFP4_BF16_FORWARD_SCOPE", "none"),
                 "mxfp4_selective_forward_scope": os.environ.get(

@@ -4,12 +4,16 @@
 """Compile-friendly Primus-Turbo MXFP4 linear kernels for FLUX."""
 
 import os
+from typing import Any, Optional
 
 import torch
+import torch.utils._pytree as pytree
+from torch._prims_common import suggest_memory_format
 from primus_turbo.pytorch.core.backend import BackendType
 from primus_turbo.pytorch.core.low_precision import ScalingGranularity
 from primus_turbo.pytorch.kernels.gemm.gemm_fp4_impl import gemm_fp4_impl
 from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
+from primus_turbo.pytorch.ops.quantization import dequantize_fp8
 
 _MXFP4_BLOCK_SIZE = 32
 _MXFP4_PADDING_ALIGN_SIZE = 128
@@ -302,6 +306,34 @@ def _quantize_mxfp8_rowwise_fake(
 
 _quantize_mxfp8_rowwise.register_autograd(
     lambda ctx, *grads: (None, None),
+    setup_context=lambda ctx, inputs, output: None,
+)
+
+
+@torch.library.custom_op("omniflow::dequantize_mxfp8_rowwise", mutates_args=(), device_types="cuda")
+def _dequantize_mxfp8_rowwise(
+    x: torch.Tensor, scale: torch.Tensor, out_dtype: torch.dtype
+) -> torch.Tensor:
+    return dequantize_fp8(
+        x,
+        out_dtype,
+        ScalingGranularity.MX_BLOCKWISE,
+        block_size=_MXFP4_BLOCK_SIZE,
+        axis=1,
+        scale_inv=scale,
+    )
+
+
+@_dequantize_mxfp8_rowwise.register_fake
+def _dequantize_mxfp8_rowwise_fake(
+    x: torch.Tensor, scale: torch.Tensor, out_dtype: torch.dtype
+) -> torch.Tensor:
+    del scale
+    return torch.empty(x.shape, dtype=out_dtype, device=x.device)
+
+
+_dequantize_mxfp8_rowwise.register_autograd(
+    lambda ctx, *grads: (None, None, None),
     setup_context=lambda ctx, inputs, output: None,
 )
 
@@ -702,6 +734,105 @@ _capture_mxfp4_linear.register_autograd(
 )
 
 
+_MXFP8_FSDP_PRESERVE_OPS = {
+    torch.ops.aten.empty_like.default,
+    torch.ops.aten.new_zeros.default,
+    torch.ops.aten.slice.Tensor,
+    torch.ops.aten.copy_.default,
+    torch.ops.aten.view.default,
+    torch.ops.aten.as_strided.default,
+    torch.ops.aten._to_copy.default,
+    torch.ops.aten._pin_memory.default,
+    torch.ops.aten.split.Tensor,
+    torch.ops.aten.clone.default,
+}
+
+
+class MXFP8FSDPWeight(torch.Tensor):
+    """FP32 master weight with MXFP8-only FSDP AllGather transport."""
+
+    @staticmethod
+    def __new__(cls, tensor: torch.Tensor, columns: int):
+        return torch.Tensor._make_wrapper_subclass(
+            cls,
+            tensor.size(),
+            strides=tensor.stride(),
+            storage_offset=tensor.storage_offset(),
+            memory_format=suggest_memory_format(tensor),
+            dtype=tensor.dtype,
+            layout=tensor.layout,
+            device=tensor.device,
+            pin_memory=tensor.is_pinned(),
+            requires_grad=tensor.requires_grad,
+        )
+
+    def __init__(self, tensor: torch.Tensor, columns: int):
+        self._tensor = tensor
+        self._columns = columns
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args, kwargs=None):
+        columns: Optional[int] = None
+
+        def unwrap(tensor):
+            nonlocal columns
+            if columns is None:
+                columns = tensor._columns
+            return tensor._tensor
+
+        args, kwargs = pytree.tree_map_only(
+            MXFP8FSDPWeight, unwrap, (args, kwargs or {})
+        )
+        output = func(*args, **kwargs)
+        if func not in _MXFP8_FSDP_PRESERVE_OPS and func != torch.ops.aten.detach.default:
+            return output
+        return pytree.tree_map_only(
+            torch.Tensor,
+            lambda tensor: MXFP8FSDPWeight(tensor, columns),
+            output,
+        )
+
+    def __tensor_flatten__(self):
+        return ["_tensor"], {"columns": self._columns}
+
+    @staticmethod
+    def __tensor_unflatten__(inner_tensors, metadata, outer_size, outer_stride):
+        return MXFP8FSDPWeight(inner_tensors["_tensor"], metadata["columns"])
+
+    def fsdp_pre_all_gather(self, mesh):
+        local_weight = self._tensor.reshape(-1, self._columns).to(torch.bfloat16)
+        qdata, scale = _quantize_mxfp8_rowwise(local_weight, True)
+        metadata = (self._columns, qdata.shape[1], scale.shape[1])
+        return (qdata.view(torch.uint8), scale.view(torch.uint8)), metadata
+
+    def fsdp_post_all_gather(
+        self,
+        all_gather_outputs: tuple[torch.Tensor, ...],
+        metadata: Any,
+        param_dtype: torch.dtype,
+        *,
+        out: Optional[torch.Tensor] = None,
+    ):
+        qdata_bytes, scale_bytes = all_gather_outputs
+        columns, padded_columns, scale_columns = metadata
+        qdata = qdata_bytes.view(_MXFP8_DTYPE).reshape(-1, padded_columns)
+        scale = scale_bytes.view(torch.float8_e8m0fnu).reshape(-1, scale_columns)
+        weight = _dequantize_mxfp8_rowwise(qdata, scale, param_dtype)[:, :columns]
+        if out is not None:
+            from torch.distributed._tensor import DTensor
+
+            target = out._local_tensor if isinstance(out, DTensor) else out
+            if isinstance(target, MXFP8FSDPWeight):
+                target = target._tensor
+            with torch.no_grad():
+                target.copy_(weight.reshape(target.shape))
+            return
+        return weight, (qdata_bytes, scale_bytes)
+
+
+torch.serialization.add_safe_globals([MXFP8FSDPWeight])
+
+
 class MXFP4Linear(torch.nn.Module):
     """Linear with recipe-selected forward and backward precision."""
 
@@ -711,6 +842,7 @@ class MXFP4Linear(torch.nn.Module):
         forward_precision: str,
         *,
         backward_precision: str = "mxfp4",
+        mxfp8_all_gather: bool = False,
         forward_hadamard: bool = False,
         activation_residual_mode: int = 0,
         eval_bf16: bool = False,
@@ -720,7 +852,15 @@ class MXFP4Linear(torch.nn.Module):
         super().__init__()
         self.in_features = linear.in_features
         self.out_features = linear.out_features
-        self.weight = linear.weight
+        if mxfp8_all_gather:
+            if forward_precision != "mxfp8" or backward_precision != "mxfp8":
+                raise ValueError("MXFP8 AllGather requires pure MXFP8 forward and backward")
+            self.weight = torch.nn.Parameter(
+                MXFP8FSDPWeight(linear.weight, linear.in_features),
+                requires_grad=linear.weight.requires_grad,
+            )
+        else:
+            self.weight = linear.weight
         self.bias = linear.bias
         self.forward_precision = forward_precision
         if backward_precision not in {"mxfp4", "mxfp8"}:

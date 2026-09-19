@@ -9,6 +9,7 @@ model:
       mxfp4_recipe: ${FLUX_MXFP4_RECIPE}
       mxfp4_forward_precision: ${FLUX_MXFP4_FORWARD_PRECISION}
       mxfp4_backward_precision: ${FLUX_MXFP4_BACKWARD_PRECISION}
+      mxfp8_all_gather: ${FLUX_MXFP8_ALL_GATHER}
       mxfp4_forward_hadamard: ${FLUX_MXFP4_FORWARD_HADAMARD}
       mxfp4_bf16_forward_scope: ${FLUX_MXFP4_BF16_FORWARD_SCOPE}
       mxfp4_selective_forward_scope: ${FLUX_MXFP4_SELECTIVE_FORWARD_SCOPE}
