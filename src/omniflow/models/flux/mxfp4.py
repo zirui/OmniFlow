@@ -843,10 +843,10 @@ class MXFP8GatheredWeight(torch.Tensor):
             )
         if func == torch.ops.aten.clone.default:
             return MXFP8GatheredWeight(
-                tensor.qdata,
-                tensor.scale,
-                tensor.qdata_t,
-                tensor.scale_t,
+                tensor.qdata.clone(),
+                tensor.scale.clone(),
+                tensor.qdata_t.clone(),
+                tensor.scale_t.clone(),
                 tensor.logical_shape,
                 tensor.logical_dtype,
                 tensor.requires_grad,
@@ -963,11 +963,21 @@ class MXFP8FSDPWeight(torch.Tensor):
                 raise RuntimeError(
                     f"Expected MXFP8GatheredWeight AllGather output, got {type(target)}"
                 )
+            updates = (
+                ("qdata", qdata),
+                ("scale", scale),
+                ("qdata_t", qdata_t),
+                ("scale_t", scale_t),
+            )
+            for name, value in updates:
+                copied = set()
+                for alias in target._aliases:
+                    destination = getattr(alias, name)
+                    pointer = destination.data_ptr()
+                    if pointer != value.data_ptr() and pointer not in copied:
+                        destination.copy_(value)
+                        copied.add(pointer)
             for alias in target._aliases:
-                alias.qdata = qdata
-                alias.scale = scale
-                alias.qdata_t = qdata_t
-                alias.scale_t = scale_t
                 alias.logical_shape = shape
                 alias.logical_dtype = param_dtype
             return
