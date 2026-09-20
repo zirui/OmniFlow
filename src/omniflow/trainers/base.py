@@ -691,7 +691,7 @@ class BaseWanTrainer:
             if self.mlperf_warmup_validation_steps:
                 self.model.eval()
                 eval_batches = iter(self.eval_dataloader)
-                with torch.no_grad():
+                with torch.no_grad(), self._mlperf_eval_context():
                     for _ in range(self.mlperf_warmup_validation_steps):
                         self.compute_loss(
                             next(eval_batches), processor=self.eval_processor
@@ -859,21 +859,8 @@ class BaseWanTrainer:
             outputs = self.model(batch, self.scheduler)
         return outputs["loss"]
 
-    def validate_loss(self) -> float:
-        if self.eval_dataloader is None:
-            raise RuntimeError("validate_loss() requires an eval dataloader.")
-
-        was_training = self.model.training
-        self.model.eval()
-        validation_start = time.perf_counter()
-        loss_sum = torch.zeros((), device=self.device, dtype=torch.float32)
-        count_sum = torch.zeros((), device=self.device, dtype=torch.float32)
-        max_steps = int(self.args.get("mlperf_eval_steps", -1))
-        if self.mlperf_enabled and max_steps > 0:
-            raise ValueError(
-                "MLPerf FLUX validation must consume all 29,696 evaluation samples."
-            )
-
+    @contextmanager
+    def _mlperf_eval_context(self):
         compiled_modules = []
         eager_forwards = []
         if os.getenv("MLPERF_EVAL_EAGER", "false").lower() == "true":
@@ -902,23 +889,40 @@ class BaseWanTrainer:
                     eager_forwards.append((module, module.forward))
                     module.forward = bf16_forward.__get__(module, type(module))
         try:
-            with torch.no_grad():
-                for step, batch in enumerate(self.eval_dataloader):
-                    if max_steps > 0 and step >= max_steps:
-                        break
-                    local_count = self._infer_local_batch_size(batch)
-                    loss = (
-                        self.compute_loss(batch, processor=self.eval_processor)
-                        .detach()
-                        .float()
-                    )
-                    loss_sum += loss * float(local_count)
-                    count_sum += float(local_count)
+            yield
         finally:
             for module, forward in eager_forwards:
                 module.forward = forward
             for module, compiled_call in compiled_modules:
                 module._compiled_call_impl = compiled_call
+
+    def validate_loss(self) -> float:
+        if self.eval_dataloader is None:
+            raise RuntimeError("validate_loss() requires an eval dataloader.")
+
+        was_training = self.model.training
+        self.model.eval()
+        validation_start = time.perf_counter()
+        loss_sum = torch.zeros((), device=self.device, dtype=torch.float32)
+        count_sum = torch.zeros((), device=self.device, dtype=torch.float32)
+        max_steps = int(self.args.get("mlperf_eval_steps", -1))
+        if self.mlperf_enabled and max_steps > 0:
+            raise ValueError(
+                "MLPerf FLUX validation must consume all 29,696 evaluation samples."
+            )
+
+        with torch.no_grad(), self._mlperf_eval_context():
+            for step, batch in enumerate(self.eval_dataloader):
+                if max_steps > 0 and step >= max_steps:
+                    break
+                local_count = self._infer_local_batch_size(batch)
+                loss = (
+                    self.compute_loss(batch, processor=self.eval_processor)
+                    .detach()
+                    .float()
+                )
+                loss_sum += loss * float(local_count)
+                count_sum += float(local_count)
 
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             torch.distributed.all_reduce(loss_sum)
