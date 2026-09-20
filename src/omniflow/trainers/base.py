@@ -874,18 +874,29 @@ class BaseWanTrainer:
                 "MLPerf FLUX validation must consume all 29,696 evaluation samples."
             )
 
-        with torch.no_grad():
-            for step, batch in enumerate(self.eval_dataloader):
-                if max_steps > 0 and step >= max_steps:
-                    break
-                local_count = self._infer_local_batch_size(batch)
-                loss = (
-                    self.compute_loss(batch, processor=self.eval_processor)
-                    .detach()
-                    .float()
-                )
-                loss_sum += loss * float(local_count)
-                count_sum += float(local_count)
+        compiled_modules = []
+        if os.getenv("MLPERF_EVAL_EAGER", "false").lower() == "true":
+            for module in self.model.modules():
+                compiled_call = getattr(module, "_compiled_call_impl", None)
+                if compiled_call is not None:
+                    compiled_modules.append((module, compiled_call))
+                    module._compiled_call_impl = None
+        try:
+            with torch.no_grad():
+                for step, batch in enumerate(self.eval_dataloader):
+                    if max_steps > 0 and step >= max_steps:
+                        break
+                    local_count = self._infer_local_batch_size(batch)
+                    loss = (
+                        self.compute_loss(batch, processor=self.eval_processor)
+                        .detach()
+                        .float()
+                    )
+                    loss_sum += loss * float(local_count)
+                    count_sum += float(local_count)
+        finally:
+            for module, compiled_call in compiled_modules:
+                module._compiled_call_impl = compiled_call
 
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             torch.distributed.all_reduce(loss_sum)

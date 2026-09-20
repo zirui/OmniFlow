@@ -158,6 +158,24 @@ def test_mlperf_eval_events_bracket_validation():
     assert all(record[1]["metadata"]["samples_count"] == 262144 for record in trainer.mlperf_logger.records)
 
 
+def test_eager_validation_temporarily_disables_compiled_modules(monkeypatch):
+    monkeypatch.setenv("MLPERF_EVAL_EAGER", "true")
+    trainer = BaseWanTrainer.__new__(BaseWanTrainer)
+    trainer.model = torch.nn.Linear(2, 1)
+    compiled_call = lambda *args, **kwargs: None
+    trainer.model._compiled_call_impl = compiled_call
+    trainer.eval_dataloader = [{"input": torch.ones(3, 2)}]
+    trainer.eval_processor = SimpleNamespace()
+    trainer.device = torch.device("cpu")
+    trainer.args = {"mlperf_eval_steps": -1}
+    trainer.mlperf_enabled = False
+    trainer.rank = 0
+    trainer.compute_loss = lambda batch, processor=None: torch.tensor(1.0)
+
+    assert trainer.validate_loss() == 1.0
+    assert trainer.model._compiled_call_impl is compiled_call
+
+
 def test_mlperf_training_blocks_are_paired_at_eval_frequency():
     trainer = _trainer()
     trainer._mlperf_log_block_start(0)
