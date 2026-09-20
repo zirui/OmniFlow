@@ -872,12 +872,17 @@ class BaseWanTrainer:
                     _dequantize_mxfp8_rowwise,
                 )
 
+                dequantized_weights = {}
+
                 def bf16_forward(module, input):
                     weight = module.weight
                     if isinstance(weight, MXFP8GatheredWeight):
-                        weight = _dequantize_mxfp8_rowwise(
-                            weight.qdata, weight.scale, weight.logical_dtype
-                        )[:, : weight.logical_shape[1]]
+                        key = weight.qdata.data_ptr()
+                        if key not in dequantized_weights:
+                            dequantized_weights[key] = _dequantize_mxfp8_rowwise(
+                                weight.qdata, weight.scale, weight.logical_dtype
+                            )[:, : weight.logical_shape[1]]
+                        weight = dequantized_weights[key]
                     return torch.nn.functional.linear(input, weight, module.bias)
 
             for module in self.model.modules():
