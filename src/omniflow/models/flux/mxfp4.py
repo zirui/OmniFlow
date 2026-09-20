@@ -1047,7 +1047,12 @@ class MXFP4Linear(torch.nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if self.eval_bf16 and not self.training:
-            return torch.nn.functional.linear(input, self.weight, self.bias)
+            weight = self.weight
+            if isinstance(weight, MXFP8GatheredWeight):
+                weight = _dequantize_mxfp8_rowwise(
+                    weight.qdata, weight.scale, weight.logical_dtype
+                )[:, : weight.logical_shape[1]]
+            return torch.nn.functional.linear(input, weight, self.bias)
         shape = input.shape[:-1]
         if self._capture_name:
             input = _capture_mxfp4_linear(input, self.weight, self._capture_name)

@@ -535,6 +535,32 @@ def test_mxfp4_eval_bf16_bypasses_strategy_and_gradient_sr_reaches_training(monk
     assert calls == []
 
 
+def test_mxfp8_gathered_weight_dequantizes_for_bf16_eval(monkeypatch):
+    mxfp4 = _load_mxfp4(monkeypatch)
+    linear = torch.nn.Linear(4, 3)
+    module = mxfp4.MXFP4Linear(linear, "mxfp8", backward_precision="mxfp8", eval_bf16=True)
+    gathered = mxfp4.MXFP8GatheredWeight(
+        torch.zeros(3, 4, dtype=torch.float8_e4m3fn),
+        torch.zeros(3, 1, dtype=torch.uint8).view(torch.float8_e8m0fnu),
+        torch.zeros(4, 3, dtype=torch.float8_e4m3fn),
+        torch.zeros(4, 1, dtype=torch.uint8).view(torch.float8_e8m0fnu),
+        (3, 4),
+        torch.bfloat16,
+    )
+    dequantized = torch.randn(3, 4)
+    monkeypatch.setattr(
+        mxfp4,
+        "_dequantize_mxfp8_rowwise",
+        lambda qdata, scale, dtype: dequantized,
+    )
+    module.weight = torch.nn.Parameter(gathered, requires_grad=False)
+    module.eval()
+    input = torch.randn(2, 4)
+    torch.testing.assert_close(
+        module(input), torch.nn.functional.linear(input, dequantized, module.bias)
+    )
+
+
 @pytest.mark.parametrize("profile", ["pareto_a", "pareto_b", "custom", "under80"])
 def test_mxfp4_profiles_use_required_runtime(profile):
     env = os.environ.copy()
