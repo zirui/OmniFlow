@@ -628,6 +628,29 @@ class BaseWanTrainer:
         self.mlperf_logger.event(
             key=c.GLOBAL_BATCH_SIZE, value=self._global_batch_size()
         )
+        mxfp_precision = os.getenv("FLUX_MXFP4_FORWARD_PRECISION", "")
+        linear_precision = "mxfp4" if mxfp_precision == "mxfp4" else (
+            "fp8" if mxfp_precision == "mxfp8" or os.getenv("FLUX_FLOAT8_RECIPE") else "bfloat16"
+        )
+        low_precision_comm = (
+            os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1"
+            or os.getenv("FLUX_MXFP8_ALL_GATHER", "0") == "1"
+        )
+        required_run_config = {
+            "lowest_numerical_precision_in_linear": linear_precision,
+            "lowest_numerical_precision_in_attn": "bfloat16",
+            "lowest_numerical_precision_in_comm": "fp8" if low_precision_comm else "bfloat16",
+            "tensor_parallelism": int(os.getenv("TP_SIZE", "1")),
+            "pipeline_parallelism": int(os.getenv("PP_SIZE", "1")),
+            "context_parallelism": int(os.getenv("SP_SIZE", "1")),
+            "expert_parallelism": int(os.getenv("EP_SIZE", "1")),
+            "micro_batch_size": self.per_device_train_batch_size,
+            "config_filename": os.path.basename(
+                os.getenv("FLUX_CONFIG") or os.getenv("CONFIG", "unknown")
+            ),
+        }
+        for key, value in required_run_config.items():
+            self.mlperf_logger.event(key=key, value=value)
         self.mlperf_logger.event(
             key=c.GRADIENT_ACCUMULATION_STEPS, value=self.grad_accum_steps
         )

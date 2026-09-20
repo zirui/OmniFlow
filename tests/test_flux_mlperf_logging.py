@@ -108,6 +108,29 @@ def test_mlperf_logs_configured_base_lr_before_warmup():
     assert trainer.mlperf_logger.records[-1] == ("start", {"key": "init_start"})
 
 
+def test_mlperf_v61_logs_precision_parallelism_and_config(monkeypatch):
+    monkeypatch.setenv("FLUX_MXFP4_FORWARD_PRECISION", "mxfp8")
+    monkeypatch.setenv("FLUX_MXFP8_ALL_GATHER", "1")
+    monkeypatch.setenv("FLUX_CONFIG", "config_4n_gbs1024_mxfp8_pure_ag.sh")
+    trainer = _trainer()
+    trainer._mlperf_log_run_start()
+
+    events = {
+        record["key"]: record["value"]
+        for kind, record in trainer.mlperf_logger.records
+        if kind == "event"
+    }
+    assert events["lowest_numerical_precision_in_linear"] == "fp8"
+    assert events["lowest_numerical_precision_in_attn"] == "bfloat16"
+    assert events["lowest_numerical_precision_in_comm"] == "fp8"
+    assert events["tensor_parallelism"] == 1
+    assert events["pipeline_parallelism"] == 1
+    assert events["context_parallelism"] == 1
+    assert events["expert_parallelism"] == 1
+    assert events["micro_batch_size"] == 64
+    assert events["config_filename"] == "config_4n_gbs1024_mxfp8_pure_ag.sh"
+
+
 def test_mlperf_cache_clear_matches_launcher(monkeypatch):
     monkeypatch.setenv("MLPERF_CLEAR_CACHES", "false")
     trainer = _trainer()
