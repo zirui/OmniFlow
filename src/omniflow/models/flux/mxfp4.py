@@ -946,9 +946,8 @@ class MXFP8FSDPWeight(torch.Tensor):
         if local_weight.shape[0] % _MXFP4_PADDING_ALIGN_SIZE:
             raise ValueError("MXFP8 AllGather requires row shards aligned to 128")
         qdata, scale = _quantize_mxfp8_rowwise(local_weight, True)
-        block_scale = scale[::_MXFP4_BLOCK_SIZE].contiguous()
         metadata = (self._columns, qdata.shape[1], scale.shape[1])
-        return (qdata.view(torch.uint8), block_scale.view(torch.uint8)), metadata
+        return (qdata.view(torch.uint8), scale.view(torch.uint8)), metadata
 
     def fsdp_post_all_gather(
         self,
@@ -961,12 +960,9 @@ class MXFP8FSDPWeight(torch.Tensor):
         qdata_bytes, scale_bytes = all_gather_outputs
         columns, padded_columns, scale_columns = metadata
         qdata = qdata_bytes.view(_MXFP8_DTYPE).reshape(-1, padded_columns)
-        block_scale = scale_bytes.view(torch.float8_e8m0fnu).reshape(
-            -1, scale_columns
-        )
-        scale = block_scale.repeat_interleave(_MXFP4_BLOCK_SIZE, dim=0)
+        scale = scale_bytes.view(torch.float8_e8m0fnu).reshape(-1, scale_columns)
         qdata_t = torch.ops.primus_turbo_cpp_extension.transpose_2d(qdata, -2, -1)
-        scale_t = block_scale.T.repeat_interleave(
+        scale_t = scale[::_MXFP4_BLOCK_SIZE].T.repeat_interleave(
             _MXFP4_BLOCK_SIZE, dim=0
         ).contiguous()
         shape = (qdata.shape[0], columns)
