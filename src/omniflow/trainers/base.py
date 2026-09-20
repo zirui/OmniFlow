@@ -875,12 +875,32 @@ class BaseWanTrainer:
             )
 
         compiled_modules = []
+        eager_forwards = []
         if os.getenv("MLPERF_EVAL_EAGER", "false").lower() == "true":
+            bf16_mxfp_eval = os.getenv("FLUX_MXFP4_EVAL_PRECISION") == "bf16"
+            if bf16_mxfp_eval:
+                from omniflow.models.flux.mxfp4 import (
+                    MXFP4Linear,
+                    MXFP8GatheredWeight,
+                    _dequantize_mxfp8_rowwise,
+                )
+
+                def bf16_forward(module, input):
+                    weight = module.weight
+                    if isinstance(weight, MXFP8GatheredWeight):
+                        weight = _dequantize_mxfp8_rowwise(
+                            weight.qdata, weight.scale, weight.logical_dtype
+                        )[:, : weight.logical_shape[1]]
+                    return torch.nn.functional.linear(input, weight, module.bias)
+
             for module in self.model.modules():
                 compiled_call = getattr(module, "_compiled_call_impl", None)
                 if compiled_call is not None:
                     compiled_modules.append((module, compiled_call))
                     module._compiled_call_impl = None
+                if bf16_mxfp_eval and isinstance(module, MXFP4Linear) and module.eval_bf16:
+                    eager_forwards.append((module, module.forward))
+                    module.forward = bf16_forward.__get__(module, type(module))
         try:
             with torch.no_grad():
                 for step, batch in enumerate(self.eval_dataloader):
@@ -895,6 +915,8 @@ class BaseWanTrainer:
                     loss_sum += loss * float(local_count)
                     count_sum += float(local_count)
         finally:
+            for module, forward in eager_forwards:
+                module.forward = forward
             for module, compiled_call in compiled_modules:
                 module._compiled_call_impl = compiled_call
 
