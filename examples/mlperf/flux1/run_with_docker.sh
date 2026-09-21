@@ -120,8 +120,10 @@ libionic_args=()
 [[ -e /dev/infiniband ]] && rdma_args=(--device=/dev/infiniband)
 [[ -n "${LIBIONIC_ABI4_PATH:-}" ]] && libionic_args=(-v "$LIBIONIC_ABI4_PATH:/usr/lib/x86_64-linux-gnu/libionic.so.1.1.54.0-187:ro")
 mkdir -p "$OUTPUT_ROOT"
+privileged_args=()
+[[ "${DOCKER_PRIVILEGED:-true}" == "true" ]] && privileged_args=(--privileged)
 
-exec docker run --rm --init --privileged \
+exec docker run --rm --init "${privileged_args[@]}" \
     --name "$CONTAINER_NAME" \
     --ulimit nofile=1048576:1048576 --ulimit memlock=-1:-1 \
     --device=/dev/kfd --device=/dev/dri "${rdma_args[@]}" --group-add video \
