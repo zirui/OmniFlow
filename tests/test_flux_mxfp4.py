@@ -535,6 +535,18 @@ def test_mxfp4_eval_bf16_bypasses_strategy_and_gradient_sr_reaches_training(monk
     assert calls == []
 
 
+def test_mxfp8_v61_profile_keeps_gbs1024_and_uses_allowed_lr_tuning():
+    command = (
+        "source examples/mlperf/flux1/config_4n_gbs1024_mxfp8_pure_ag_v61.sh; "
+        'printf "%s\\n" "$GLOBAL_BATCH_SIZE" "$LOCAL_BATCH_SIZE" "$LR" '
+        '"$WARMUP_STEPS" "$EVAL_BATCH_SIZE" "$DP_REPLICATE" "$FLUX_MXFP8_ALL_GATHER"'
+    )
+    result = subprocess.run(
+        ["bash", "-c", command], check=True, capture_output=True, text=True
+    )
+    assert result.stdout.splitlines() == ["1024", "32", "0.000275", "800", "116", "4", "1"]
+
+
 @pytest.mark.parametrize("profile", ["pareto_a", "pareto_b", "custom", "under80"])
 def test_mxfp4_profiles_use_required_runtime(profile):
     env = os.environ.copy()
