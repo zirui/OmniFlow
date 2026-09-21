@@ -156,7 +156,22 @@ exec docker run --rm --init "${privileged_args[@]}" \
         fi
         if [[ "$MLPERF_CLEAR_CACHES" == "true" ]]; then
             sync
-            echo 3 > /proc/sys/vm/drop_caches
+            if ! echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; then
+                python - <<"PY"
+import os
+
+for root in (os.environ["DATASET_PATH"], os.environ["EVAL_DATASET_PATH"], os.environ["EMPTY_ENCODINGS_PATH"]):
+    for directory, _, files in os.walk(root):
+        for name in files:
+            try:
+                fd = os.open(os.path.join(directory, name), os.O_RDONLY)
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                os.close(fd)
+            except OSError:
+                pass
+PY
+                echo "[flux1] evicted dataset files with POSIX_FADV_DONTNEED"
+            fi
         fi
         torchrun \
           --nnodes="$NNODES" \
