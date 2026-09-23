@@ -1,4 +1,4 @@
-# FLUX v0.4.3, rebuilt from the public Primus v26.3 image with every
+# FLUX v0.4.4, rebuilt from the public Primus v26.3 image with every
 # intermediate change recorded below.
 FROM rocm/primus:v26.3 AS rocm-builder
 
@@ -255,8 +255,19 @@ assert gemm_fp8_tensorwise_flydsl_kernel
 assert gemm_mxfp8_flydsl_kernel
 PY
 
+# Embed the qualified OmniFlow revision that implements hipblaslt_fixed. The
+# editable install keeps its C++ source available for torch's JIT extension.
+ARG OMNIFLOW_V044_REVISION=a9dec1b066e21bda2a5e9991f48aa282fd76e0f5
+RUN git clone --filter=blob:none --no-checkout https://github.com/zirui/OmniFlow.git /workspace/OmniFlow && \
+    git -C /workspace/OmniFlow checkout "${OMNIFLOW_V044_REVISION}" && \
+    pip install --no-cache-dir --no-deps -e /workspace/OmniFlow && \
+    test -s /workspace/OmniFlow/src/omniflow/models/registrations/hipblaslt_fixed.cpp && \
+    python -c 'from omniflow.models.registrations.hipblaslt_fixed import load_extension; assert load_extension'
+
 LABEL com.amd.rocm-libraries.revision="1eb36d29ee99c8503565e0897ac74df289718699" \
       com.amd.primus-turbo.revision="bad914fcc0d4fab9ab9d7710e754471bc2801f2e" \
-      com.amd.hipblaslt.fix="ROCm/rocm-libraries#10951"
+      com.amd.omniflow.revision="${OMNIFLOW_V044_REVISION}" \
+      com.amd.hipblaslt.fix="ROCm/rocm-libraries#10951" \
+      com.amd.flux.fp8-backend="hipblaslt_fixed"
 
 CMD ["/usr/bin/bash"]
