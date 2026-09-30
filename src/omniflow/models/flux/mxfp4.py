@@ -193,6 +193,20 @@ def _quantize_mxfp8_rowwise_mxfp4_colwise(
     shuffle_colwise_scale: bool,
     shuffle_colwise: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if os.getenv("FLUX_MXFP4_FLYDSL_QUANT", "0") == "1" and not (
+        shuffle_colwise_scale or shuffle_colwise
+    ):
+        from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import (
+            flydsl_mxfp8_row_mxfp4_col_quant,
+        )
+
+        return flydsl_mxfp8_row_mxfp4_col_quant(
+            x,
+            row_2d=rowwise_fp8_use_2d_block,
+            col_2d=colwise_fp4_use_2d_block,
+            col_rht=colwise_fp4_use_rht,
+            scale_rounding_mode=2,
+        )
     return torch.ops.primus_turbo_cpp_extension.quantize_mxfp8_rowwise_mxfp4_colwise(
         x,
         rowwise_fp8_use_2d_block,

@@ -108,6 +108,31 @@ def test_mxfp4_quantizer_wrappers_call_raw_ops_and_have_nondifferentiable_autogr
     assert mxfp4._quantize_mxfp8_rowwise_mxfp4_colwise._backward_fn(None, None, None, None, None) == (None,) * 6
 
 
+def test_mixed_quantizer_uses_flydsl_for_unshuffled_layout(monkeypatch):
+    mxfp4 = _load_mxfp4(monkeypatch)
+    x = torch.ones(2, 32)
+    expected = (x, x, x, x)
+    module = types.ModuleType("primus_turbo.flydsl.quantization.mxfp4_quant_kernel")
+    calls = []
+
+    def mixed(*args, **kwargs):
+        calls.append((args, kwargs))
+        return expected
+
+    module.flydsl_mxfp8_row_mxfp4_col_quant = mixed
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setenv("FLUX_MXFP4_FLYDSL_QUANT", "1")
+
+    actual = mxfp4._quantize_mxfp8_rowwise_mxfp4_colwise._init_fn(
+        x, False, True, True, False, False
+    )
+
+    assert actual == expected
+    assert calls == [
+        ((x,), {"row_2d": False, "col_2d": True, "col_rht": True, "scale_rounding_mode": 2})
+    ]
+
+
 def test_mxfp8_forward_saves_fused_colwise_outputs_for_backward(monkeypatch):
     mxfp4 = _load_mxfp4(monkeypatch)
     input = torch.randn(2, 4, requires_grad=True)
