@@ -272,7 +272,8 @@ PY
 
 LABEL com.amd.rocm-libraries.revision="1eb36d29ee99c8503565e0897ac74df289718699" \
       com.amd.primus-turbo.revision="8cda13c79adca2f8fd4aef7cda7ed19597e03b3b" \
-      com.amd.primus-turbo.mixed-quant="main-compatible-flydsl" \
+      com.amd.primus-turbo.mixed-quant-revision="32cad3441bf46deec50ac516e2eddcdd10b985f3" \
+      com.amd.omniflow.revision="62fe4f31d9b00c46a1dbaefc436121360230c979" \
       com.amd.primus.mxfp4-scale-policy="mode-2-uos-7p25" \
       com.amd.hipblaslt.fix="ROCm/rocm-libraries#10951"
 
