@@ -452,10 +452,18 @@ index 12ddc283..9ccef01e 100644
      const at::Tensor input, const at::ScalarType dest_dtype, const int64_t padding_align_size,
      const bool rowwise_use_2d_block, const bool rowwise_use_sr, const bool rowwise_use_rht,
 diff --git a/primus_turbo/flydsl/quantization/mxfp4_quant_kernel.py b/primus_turbo/flydsl/quantization/mxfp4_quant_kernel.py
-index 45865b71..26692973 100644
+index 45865b71..abb102b5 100644
 --- a/primus_turbo/flydsl/quantization/mxfp4_quant_kernel.py
 +++ b/primus_turbo/flydsl/quantization/mxfp4_quant_kernel.py
-@@ -203,11 +203,35 @@ def _cvt_microblock_to_fp4(vf, scale_native_f32, seed=None):
+@@ -28,6 +28,7 @@ Numerics reproduce ``csrc/kernels/quantization/quantization_mxfp4.cu`` exactly:
+ import flydsl.compiler as flyc
+ import flydsl.expr as fx
+ from flydsl.expr import arith, buffer_ops, math, range_constexpr, rocdl
++from flydsl.expr.arith import ArithValue
+ from flydsl.expr.typing import T
+ from flydsl.expr.typing import Vector as Vec
+ from flydsl.expr.utils.arith import _to_raw as _raw
+@@ -203,11 +204,35 @@ def _cvt_microblock_to_fp4(vf, scale_native_f32, seed=None):
  
  
  def _store_words_vec4(rsrc, off, words):
@@ -493,7 +501,7 @@ index 45865b71..26692973 100644
  def _lds_store_vec4(lds_ptr, off, vec):
      fx.make_view(fx.add_offset(lds_ptr, fx.make_int_tuple(off)), fx.make_layout(4, 1)).store(vec)
  
-@@ -439,8 +463,9 @@ def _emit_dual_body(
+@@ -439,8 +464,9 @@ def _emit_dual_body(
      GAMMA=None,
      pack_row=None,
      pack_col=None,
@@ -504,7 +512,7 @@ index 45865b71..26692973 100644
      ``bid``. ``row_2d``/``col_2d`` pick the C++ ``USE_2D_BLOCK`` amax geometry; the
      batched-3D kernel passes per-expert base offsets ``gx/gro/grsc/gco/gcsc`` and
      ``gmul=G`` to widen the SRDs over the whole 3D tensor (R,C stay per-expert).
-@@ -460,6 +485,8 @@ def _emit_dual_body(
+@@ -460,6 +486,8 @@ def _emit_dual_body(
      # the allocated width as ``row_bytes``, so the alignment is the quantiser's to give. The
      # scale keeps the K_pad width and therefore still carries the true contraction.
      dpad = cpad if (batched or not padded) else ncblk * _TC
@@ -513,7 +521,7 @@ index 45865b71..26692973 100644
      # Block order = which output's partial stores L2 can combine. col_locality: row-tile-fastest
      # so blocks writing the same col-out rows run back-to-back and L2 merges the scattered
      # transpose stores; else col-tile-fastest keeps the tile load and row-out on the same rows.
-@@ -501,7 +528,7 @@ def _emit_dual_body(
+@@ -501,7 +529,7 @@ def _emit_dual_body(
  
      if batched:
          rsrc = _srd(X, gx, 4, R * (C >> 1) * 4)
@@ -522,7 +530,7 @@ index 45865b71..26692973 100644
          rscrsrc = _srd(ROW_SC, grsc, 1, R * (cpad >> 5))
          corsrc = _srd(COL_OUT, gco, 4, C * (rpad >> 3) * 4)
          cscrsrc = _srd(COL_SC, gcsc, 1, C * (rpad >> 5))
-@@ -514,7 +541,7 @@ def _emit_dual_body(
+@@ -514,7 +542,7 @@ def _emit_dual_body(
          # past R read 0 and stores past R are dropped, with no per-access predicate.
          trow = _imin(R - r0, fx.Int32(_TR))
          rsrc = _srd(X, r0i * arith.index_cast(T.index, C >> 1), 4, trow * (C >> 1) * 4)
@@ -531,7 +539,7 @@ index 45865b71..26692973 100644
          if pack_row is None:
              rscrsrc = _srd(ROW_SC, r0i * arith.index_cast(T.index, cpad >> 5), 1, trow * (cpad >> 5))
          else:
-@@ -659,13 +686,16 @@ def _emit_dual_body(
+@@ -659,13 +687,16 @@ def _emit_dual_body(
                  v4 = _lds_load_vec4(lds.scr.ptr, cmb * _SCP + row_base + q * 4)
                  for j in range_constexpr(4):
                      tile_amax = _imax(tile_amax, v4[j])
@@ -553,16 +561,18 @@ index 45865b71..26692973 100644
              sc = (
                  grow * (cpad >> 5) + gcmb + grsc
                  if pack_row is None
-@@ -683,7 +713,7 @@ def _emit_dual_body(
+@@ -683,8 +714,8 @@ def _emit_dual_body(
              if padded:
                  rwords, rbiased = _zero_pad_cmb(gcmb, rwords, rbiased)
                  ob, sc = _row_store_offs(gcmb, ob, sc)
 -            _store_words_vec4(orsrc, ob, rwords)
+-            buffer_ops.buffer_store(arith.trunci(T.i8, rbiased & 0xFF), rscrsrc, sc)
 +            _store_quant_words(orsrc, ob, rwords)
-             buffer_ops.buffer_store(arith.trunci(T.i8, rbiased & 0xFF), rscrsrc, sc)
++            buffer_ops.buffer_store(ArithValue(rbiased & fx.Int32(255)).trunci(T.i8), rscrsrc, sc)
      else:
          for k in range_constexpr(_RROWTASK):
-@@ -698,16 +728,20 @@ def _emit_dual_body(
+             task = k * BLK + tid
+@@ -698,16 +729,20 @@ def _emit_dual_body(
                      word = v4[j]
                      rbits.append(word << 16)
                      rbits.append(word & 0xFFFF0000)
@@ -591,16 +601,36 @@ index 45865b71..26692973 100644
              sc = (
                  grow * (cpad >> 5) + gcmb + grsc
                  if pack_row is None
-@@ -725,7 +759,7 @@ def _emit_dual_body(
+@@ -725,8 +760,8 @@ def _emit_dual_body(
              if padded:
                  rwords, rbiased = _zero_pad_cmb(gcmb, rwords, rbiased)
                  ob, sc = _row_store_offs(gcmb, ob, sc)
 -            _store_words_vec4(orsrc, ob, rwords)
+-            buffer_ops.buffer_store(arith.trunci(T.i8, rbiased & 0xFF), rscrsrc, sc)
 +            _store_quant_words(orsrc, ob, rwords)
-             buffer_ops.buffer_store(arith.trunci(T.i8, rbiased & 0xFF), rscrsrc, sc)
++            buffer_ops.buffer_store(ArithValue(rbiased & fx.Int32(255)).trunci(T.i8), rscrsrc, sc)
  
      # ---- COL phase: thread = column, 32-row microblocks (strided LDS reads) ----
-@@ -909,6 +943,7 @@ def _build_dual_kernel(
+     c_col = tid
+@@ -856,7 +891,7 @@ def _emit_dual_body(
+             if cs_packed:
+                 cbs.append(cbiased)
+             else:
+-                buffer_ops.buffer_store(arith.trunci(T.i8, cbiased & 0xFF), cscrsrc, csoff)
++                buffer_ops.buffer_store(ArithValue(cbiased & fx.Int32(255)).trunci(T.i8), cscrsrc, csoff)
+         if cs_packed:
+             _store_col_scales(cbs)
+         _store_col_out(cws)
+@@ -891,7 +926,7 @@ def _emit_dual_body(
+             if cs_packed:
+                 cbs.append(cbiased)
+             else:
+-                buffer_ops.buffer_store(arith.trunci(T.i8, cbiased & 0xFF), cscrsrc, csoff)
++                buffer_ops.buffer_store(ArithValue(cbiased & fx.Int32(255)).trunci(T.i8), cscrsrc, csoff)
+         if cs_packed:
+             _store_col_scales(cbs)
+         _store_col_out(cws)
+@@ -909,6 +944,7 @@ def _build_dual_kernel(
      pack_col=None,
      padded=False,
      rowpad=False,
@@ -608,7 +638,7 @@ index 45865b71..26692973 100644
  ):
      """Single-recipe fused LDS dual (one coalesced 32x256 tile load feeds both the
      rowwise and colwise-transpose casts). Thin wrapper over ``_emit_dual_body``.
-@@ -962,6 +997,7 @@ def _build_dual_kernel(
+@@ -962,6 +998,7 @@ def _build_dual_kernel(
              pack_row=pack_row,
              pack_col=pack_col,
              sr_gbid=fx.block_idx.x,
@@ -616,7 +646,7 @@ index 45865b71..26692973 100644
          )
  
      return _dual_kernel
-@@ -979,6 +1015,7 @@ def _build_dual_launch(
+@@ -979,6 +1016,7 @@ def _build_dual_launch(
      pack_col=None,
      padded=False,
      rowpad=False,
@@ -624,7 +654,7 @@ index 45865b71..26692973 100644
  ):
      kern = _build_dual_kernel(
          row_rht,
-@@ -992,6 +1029,7 @@ def _build_dual_launch(
+@@ -992,6 +1030,7 @@ def _build_dual_launch(
          pack_col,
          padded,
          rowpad,
@@ -632,7 +662,7 @@ index 45865b71..26692973 100644
      )
  
      @flyc.jit
-@@ -1106,6 +1144,66 @@ def flydsl_dual_quant(
+@@ -1106,6 +1145,66 @@ def flydsl_dual_quant(
      return row_data, row_scale, col_data, col_scale
  
  
@@ -699,7 +729,7 @@ index 45865b71..26692973 100644
  def get_dual_cast(
      R,
      C,
-@@ -1117,6 +1215,7 @@ def get_dual_cast(
+@@ -1117,6 +1216,7 @@ def get_dual_cast(
      col_sr=False,
      pack_row=None,
      pack_col=None,
@@ -707,7 +737,7 @@ index 45865b71..26692973 100644
  ):
      """Return (compiled_fn, grid_x, CP, RP, padded, DP) for the fused dual at
      (R, C, row_rht, col_rht, row_2d, col_2d, row_sr, col_sr). CP=ceil(C/128)*128 (row scale),
-@@ -1154,6 +1253,7 @@ def get_dual_cast(
+@@ -1154,6 +1254,7 @@ def get_dual_cast(
              tr,
              tc,
              _LOAD_AUX,
@@ -715,7 +745,7 @@ index 45865b71..26692973 100644
          )
          raw = _DUAL_LAUNCH.get(lk)
          if raw is None:
-@@ -1169,6 +1269,7 @@ def get_dual_cast(
+@@ -1169,6 +1270,7 @@ def get_dual_cast(
                  pack_col,
                  padded,
                  rowpad,
@@ -723,7 +753,7 @@ index 45865b71..26692973 100644
              )
              _DUAL_LAUNCH[lk] = raw
          key = (int(R), int(C), *lk)
-@@ -1177,7 +1278,7 @@ def get_dual_cast(
+@@ -1177,7 +1279,7 @@ def get_dual_cast(
              import torch
  
              x = torch.zeros((R, C // 2), dtype=torch.int32, device="cuda")
