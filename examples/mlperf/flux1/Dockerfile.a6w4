@@ -1,0 +1,89 @@
+# Reproducible FLUX A6W4 image from a pinned public Primus base.
+ARG PRIMUS_BASE=rocm/primus:v26.3
+FROM ${PRIMUS_BASE} AS builder
+
+ARG PRIMUS_TURBO_REPOSITORY=https://github.com/zirui/Primus-Turbo.git
+ARG PRIMUS_TURBO_REVISION=3a86c993c40cc8d040e94b4cae7f7804ffd06ed5
+RUN pip install --no-cache-dir --upgrade flydsl==0.2.4 && \
+    git clone --filter=blob:none --no-checkout "${PRIMUS_TURBO_REPOSITORY}" /tmp/Primus-Turbo && \
+    git -C /tmp/Primus-Turbo checkout "${PRIMUS_TURBO_REVISION}" && \
+    git -C /tmp/Primus-Turbo submodule update --init --recursive && \
+    mkdir -p /tmp/wheel && \
+    GPU_ARCHS=gfx950 ROCSHMEM_HOME=/tmp/rocshmem-not-installed \
+      pip wheel --no-build-isolation --no-deps /tmp/Primus-Turbo -w /tmp/wheel
+
+FROM ${PRIMUS_BASE}
+
+ARG PRIMUS_TURBO_REVISION=3a86c993c40cc8d040e94b4cae7f7804ffd06ed5
+COPY --from=builder /tmp/wheel/primus_turbo-*.whl /tmp/wheel/
+RUN pip install --no-cache-dir --upgrade flydsl==0.2.4 && \
+    pip install --no-cache-dir --no-deps --force-reinstall /tmp/wheel/primus_turbo-*.whl && \
+    rm -rf /tmp/wheel
+
+# Unsupported horizontal-fusion candidates must not abort the full graph compile.
+RUN python - <<'PY'
+from pathlib import Path
+
+path = Path("/opt/venv/lib/python3.12/site-packages/torch/_inductor/scheduler.py")
+source = path.read_text().replace(
+    "from .exc import GPUTooOldForTriton, TritonMissing",
+    "from .exc import GPUTooOldForTriton, InductorError, TritonMissing",
+)
+old = """            future_and_mod_l1 = self.compile_kernel(node_list_1)
+            future_and_mod_l2 = self.compile_kernel(node_list_2)
+            future_and_mod_l1_fused = self.compile_kernel(node_list_fused)
+"""
+new = """            try:
+                future_and_mod_l1 = self.compile_kernel(node_list_1)
+                future_and_mod_l2 = self.compile_kernel(node_list_2)
+                future_and_mod_l1_fused = self.compile_kernel(node_list_fused)
+            except (InductorError, NotImplementedError):
+                return FusionResult.fuse(False)
+"""
+old_210 = """            future_and_mod_l1 = compile_kernel(node_list_1)
+            future_and_mod_l2 = compile_kernel(node_list_2)
+            future_and_mod_l1_fused = compile_kernel(node_list_fused)
+"""
+new_210 = """            try:
+                future_and_mod_l1 = compile_kernel(node_list_1)
+                future_and_mod_l2 = compile_kernel(node_list_2)
+                future_and_mod_l1_fused = compile_kernel(node_list_fused)
+            except (CompilationError, NotImplementedError):
+                return False
+"""
+if old in source:
+    source = source.replace(old, new)
+elif old_210 in source:
+    source = source.replace(old_210, new_210)
+else:
+    raise AssertionError("unexpected torch/_inductor/scheduler.py")
+path.write_text(source)
+PY
+
+RUN python - <<'PY'
+import ast
+from importlib.metadata import version
+from pathlib import Path
+
+root = Path("/opt/venv/lib/python3.12/site-packages/primus_turbo")
+required = {
+    "flydsl/gemm/gemm_a6w4_kernel_tuned.py": "gemm_a6w4",
+    "flydsl/quantization/a6w4_quant.py": "quant_act_a6w4",
+    "flydsl/quantization/mxfp4_quant_kernel_flux.py": "flydsl_quant_a6w4_act_dual",
+    "pytorch/ops/flux_a6w4.py": "a6w4_mm_qa",
+}
+for relative, symbol in required.items():
+    definitions = {
+        node.name
+        for node in ast.parse((root / relative).read_text()).body
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+    }
+    assert symbol in definitions, (relative, symbol)
+assert next((root / "pytorch").glob("_C*.so")).stat().st_size > 0
+assert version("flydsl") == "0.2.4"
+PY
+
+LABEL com.amd.primus-turbo.revision="${PRIMUS_TURBO_REVISION}" \
+      com.amd.primus-turbo.flux-a6w4="mpof-tuned"
+
+CMD ["/usr/bin/bash"]

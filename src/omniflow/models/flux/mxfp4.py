@@ -480,6 +480,87 @@ def _mxfp4_backward(ctx, grad_output, a_t, a_t_scale, b_t, b_t_scale):
     return grad_input, grad_weight
 
 
+@torch.library.custom_op("omniflow::quantize_a6w4_dual", mutates_args=(), device_types="cuda")
+def _quantize_a6w4_dual(
+    input: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    from primus_turbo.flydsl.quantization.mxfp4_quant_kernel_flux import (
+        flydsl_quant_a6w4_act_dual,
+    )
+
+    return flydsl_quant_a6w4_act_dual(input)
+
+
+@_quantize_a6w4_dual.register_fake
+def _quantize_a6w4_dual_fake(
+    input: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    rows, columns = input.shape
+    return (
+        torch.empty(rows, columns, dtype=torch.uint8, device=input.device),
+        torch.empty(rows * columns // 32, dtype=torch.uint8, device=input.device),
+        torch.empty(columns, rows // 2, dtype=_FP4_DTYPE, device=input.device),
+        torch.empty(columns, rows // 32, dtype=torch.float8_e8m0fnu, device=input.device),
+    )
+
+
+@torch.library.custom_op("omniflow::a6w4_linear", mutates_args=(), device_types="cuda")
+def _a6w4_linear(
+    input: torch.Tensor, input_scale: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    from primus_turbo.pytorch.ops.flux_a6w4 import a6w4_mm_qa
+
+    return a6w4_mm_qa(input, input_scale, weight)
+
+
+@_a6w4_linear.register_fake
+def _a6w4_linear_fake(
+    input: torch.Tensor, input_scale: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    del input_scale
+    return torch.empty(input.shape[0], weight.shape[0], dtype=weight.dtype, device=input.device)
+
+
+class _A6W4Forward(torch.autograd.Function):
+    @staticmethod
+    def forward(input, weight, preshuffle, use_gradient_sr):
+        input_2d = input.reshape(-1, input.shape[-1])
+        a, a_scale, a_t, a_t_scale = _quantize_a6w4_dual(input_2d)
+        b_t, b_t_scale = _quantize_mxfp4_colwise(
+            weight, True, False, preshuffle, preshuffle
+        )
+        return (
+            _a6w4_linear(a, a_scale, weight),
+            a_t.view(torch.uint8),
+            a_t_scale.view(torch.uint8),
+            b_t.view(torch.uint8),
+            b_t_scale.view(torch.uint8),
+        )
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        input, _, preshuffle, use_gradient_sr = inputs
+        ctx.preshuffle = preshuffle
+        ctx.use_gradient_sr = use_gradient_sr
+        ctx.out_dtype = input.dtype
+        ctx.orig_shape = input.shape
+        _, a_t, a_t_scale, b_t, b_t_scale = output
+        ctx.save_for_backward(
+            a_t.view(_FP4_DTYPE),
+            a_t_scale.view(torch.float8_e8m0fnu),
+            b_t.view(_FP4_DTYPE),
+            b_t_scale.view(torch.float8_e8m0fnu),
+        )
+        ctx.mark_non_differentiable(a_t, a_t_scale, b_t, b_t_scale)
+
+    @staticmethod
+    def backward(ctx, grad_output, *_):
+        grad_input, grad_weight = _mxfp4_backward(
+            ctx, grad_output, *ctx.saved_tensors
+        )
+        return grad_input, grad_weight, None, None
+
+
 class _MXFP8Forward(torch.autograd.Function):
     @staticmethod
     def forward(input, weight, preshuffle, use_gradient_sr):
@@ -568,6 +649,7 @@ _FORWARD_FUNCTIONS = {
     "bf16": _BF16Forward,
     "mxfp4": _MXFP4Forward,
     "mxfp8": _MXFP8Forward,
+    "a6w4": _A6W4Forward,
 }
 
 _MXFP4_CAPTURE_STEP = -1
@@ -683,7 +765,7 @@ class MXFP4Linear(torch.nn.Module):
             result = function.apply(
                 input, self.weight, self.preshuffle, self.gradient_stochastic_rounding
             )
-            output = result[0] if self.forward_precision == "mxfp8" else result
+            output = result[0] if self.forward_precision in {"mxfp8", "a6w4"} else result
         if self.bias is not None:
             output = output + self.bias
         return output.reshape(*shape, self.out_features)

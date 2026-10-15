@@ -37,6 +37,9 @@ def test_mxfp4_quantizer_custom_ops_have_compile_schemas_and_fake_shapes(monkeyp
     assert str(mxfp4._quantize_mxfp4_colwise._schema) == (
         "(Tensor x, bool use_2d_block, bool use_rht, bool shuffle_scale, bool shuffle) -> (Tensor, Tensor)"
     )
+    assert str(mxfp4._a6w4_linear._schema) == (
+        "(Tensor input, Tensor input_scale, Tensor weight) -> Tensor"
+    )
     assert str(mxfp4._quantize_mxfp8_rowwise_mxfp4_colwise._schema) == (
         "(Tensor x, bool rowwise_fp8_use_2d_block, bool colwise_fp4_use_2d_block, "
         "bool colwise_fp4_use_rht, bool shuffle_colwise_scale, bool shuffle_colwise) "
@@ -193,6 +196,41 @@ def test_mxfp8_forward_saves_fused_colwise_outputs_for_backward(monkeypatch):
         torch.float4_e2m1fn_x2,
         torch.float8_e8m0fnu,
     ]
+
+
+def test_a6w4_forward_uses_low_precision_forward_and_mxfp4_backward(monkeypatch):
+    mxfp4 = _load_mxfp4(monkeypatch)
+    input = torch.randn(2, 4, requires_grad=True)
+    weight = torch.randn(3, 4, requires_grad=True)
+    calls = []
+
+    def colwise(value, *options):
+        calls.append((value.shape, options))
+        return value, torch.empty(0)
+
+    monkeypatch.setattr(mxfp4, "_quantize_mxfp4_colwise", colwise)
+    monkeypatch.setattr(
+        mxfp4,
+        "_quantize_a6w4_dual",
+        lambda value: (value, torch.empty(0), value, torch.empty(0)),
+    )
+    monkeypatch.setattr(mxfp4, "_a6w4_linear", lambda a, scale, b: a @ b.T)
+    monkeypatch.setattr(
+        mxfp4,
+        "_mxfp4_backward",
+        lambda ctx, grad_output, *quantized: (
+            torch.zeros(ctx.orig_shape),
+            torch.zeros(3, 4),
+        ),
+    )
+
+    output = mxfp4._A6W4Forward.apply(input, weight, False, False)[0]
+    output.sum().backward()
+
+    assert calls == [
+        (torch.Size([3, 4]), (True, False, False, False)),
+    ]
+    assert input.grad is not None and weight.grad is not None
 
 
 def test_bf16_backward_only_quantizes_colwise_mxfp4(monkeypatch):

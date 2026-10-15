@@ -52,7 +52,7 @@ _FP8_DOUBLE_MLP_SUFFIXES = {
     "txt_mlp.2",
 }
 _MXFP4_RECIPES = {"pareto_a", "pareto_b", "custom"}
-_MXFP4_PRECISIONS = {"bf16", "mxfp4", "mxfp8"}
+_MXFP4_PRECISIONS = {"bf16", "mxfp4", "mxfp8", "a6w4"}
 _MXFP4_DOUBLE_SUFFIXES = {
     "img_attn.qkv", "img_attn.proj", "img_mlp.0", "img_mlp.2",
     "txt_attn.qkv", "txt_attn.proj", "txt_mlp.0", "txt_mlp.2",
@@ -674,6 +674,7 @@ def build_flux_model(model_config: dict[str, Any]):
                     fqn=fqn,
                 ),
             )
+            precision_counts.setdefault(forward_precision, 0)
             precision_counts[forward_precision] += 1
 
         expected_total = len(dit.double_blocks) * 8 + len(dit.single_blocks) * 2

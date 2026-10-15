@@ -22,6 +22,14 @@ docker build -f examples/mlperf/flux1/Dockerfile.mxfp4 \
   -t zirui3/primus-v26.3-flux:v0.4-mxfp4-mixed-quant-uos .
 ```
 
+The experimental A6W4 image uses the public Primus v26.3 base and pins the
+FLUX-tuned Primus-Turbo implementation:
+
+```bash
+docker build -f examples/mlperf/flux1/Dockerfile.a6w4 \
+  -t zirui3/primus-v26.3-flux-a6w4:mpof-3a86c993 .
+```
+
 ## Data
 
 Download the preprocessed MLPerf datasets:
@@ -124,7 +132,7 @@ research comparisons, not as an MLPerf submission recipe.
 | Environment variable | Values |
 |---|---|
 | `FLUX_MXFP4_RECIPE` | `custom` (or fixed `pareto_a` / `pareto_b`) |
-| `FLUX_MXFP4_FORWARD_PRECISION` | `bf16`, `mxfp8`, `mxfp4` |
+| `FLUX_MXFP4_FORWARD_PRECISION` | `bf16`, `mxfp8`, `mxfp4`, `a6w4` |
 | `FLUX_MXFP4_BF16_FORWARD_SCOPE` | `none`, `double_img_up_2_3`, `double_img_up`, `double_img_mlp_attn_out`, `double_img_all`, `double_img_all_txt_mlp_down`, `double_img_all_txt_mlp`, `double_all` |
 | `FLUX_MXFP4_SELECTIVE_FORWARD_SCOPE` | `none`, `single_linear2`, `single_linear1_early`, `late_txt_mlp_up` |
 | `FLUX_MXFP4_FORWARD_HADAMARD` | `none`, `mlp`, `all` |

@@ -38,6 +38,28 @@ from omniflow.utils.log import logger
 from .base import BaseWanTrainer
 
 
+class _DoubleBlockGroup(torch.nn.Module):
+    def __init__(self, blocks):
+        super().__init__()
+        self.blocks = torch.nn.ModuleList(blocks)
+
+    def forward(self, img, txt, vec, pe):
+        for block in self.blocks:
+            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+        return img, txt
+
+
+class _SingleBlockGroup(torch.nn.Module):
+    def __init__(self, blocks):
+        super().__init__()
+        self.blocks = torch.nn.ModuleList(blocks)
+
+    def forward(self, img, vec, pe):
+        for block in self.blocks:
+            img = block(img, vec=vec, pe=pe)
+        return img
+
+
 class FSDP2Trainer(BaseWanTrainer):
     def __init__(
         self,
@@ -217,6 +239,23 @@ class FSDP2Trainer(BaseWanTrainer):
                 f"found non-FP32 parameters including {non_fp32_params[:3]}."
             )
 
+        block_group_size = int(os.getenv("FSDP2_BLOCK_GROUP_SIZE", "1"))
+        if block_group_size < 1:
+            raise ValueError("FSDP2_BLOCK_GROUP_SIZE must be at least 1")
+        if block_group_size > 1:
+            for name, group_type in (
+                ("double_blocks", _DoubleBlockGroup),
+                ("single_blocks", _SingleBlockGroup),
+            ):
+                blocks = getattr(wrap_root, name)
+                groups = [
+                    group_type(blocks[start : start + block_group_size])
+                    for start in range(0, len(blocks), block_group_size)
+                ]
+                setattr(wrap_root, name, torch.nn.ModuleList(groups))
+            if self.rank == 0:
+                logger.info(f"FSDP2: grouped adjacent FLUX blocks in units of {block_group_size}")
+
         compile_transformer_blocks = bool(self.args.get("compile_transformer_blocks", False))
         compile_strategy = str(self.args.get("compile_strategy", "per_block")).strip().lower()
         if compile_transformer_blocks:
@@ -267,12 +306,15 @@ class FSDP2Trainer(BaseWanTrainer):
 
             cls_objs = set()
             cls_names = set()
-            for item in layer_cls_items:
-                if "." in item:
-                    mod_path, cls_name = item.rsplit(".", 1)
-                    cls_objs.add(getattr(import_module(mod_path), cls_name))
-                else:
-                    cls_names.add(item)
+            if block_group_size > 1:
+                cls_objs.update({_DoubleBlockGroup, _SingleBlockGroup})
+            else:
+                for item in layer_cls_items:
+                    if "." in item:
+                        mod_path, cls_name = item.rsplit(".", 1)
+                        cls_objs.add(getattr(import_module(mod_path), cls_name))
+                    else:
+                        cls_names.add(item)
 
             wrapped_count = 0
             seen = set()
@@ -316,7 +358,16 @@ class FSDP2Trainer(BaseWanTrainer):
             reshard_after_forward=reshard_after_forward,
             mp_policy=mp_policy,
         )
+        if os.getenv("FSDP2_FORCE_SUM", "0") == "1":
+            for module in wrap_root.modules():
+                setter = getattr(module, "set_force_sum_reduction_for_comms", None)
+                if callable(setter):
+                    setter(True)
+            if self.rank == 0:
+                logger.info("FSDP2: SUM collectives with explicit gradient averaging")
         if self.rank == 0:
+            if os.getenv("FSDP2_ACCUMULATE_UNSHARDED", "0") == "1":
+                logger.info("FSDP2: keeping parameters unsharded between accumulation steps")
             logger.info(
                 f"FSDP2: applied fully_shard to '{wrap_target or '<model>'}' "
                 f"with mp={mp_dtype}, reduce={reduce_dtype}"
@@ -352,8 +403,11 @@ class FSDP2Trainer(BaseWanTrainer):
                 if blocks is None:
                     continue
                 for index, block in enumerate(blocks):
-                    block.compile(**compile_kwargs)
-                    compiled_regions.append(f"{attr}[{index}]")
+                    compile_blocks = getattr(block, "blocks", (block,))
+                    for child_index, compile_block in enumerate(compile_blocks):
+                        compile_block.compile(**compile_kwargs)
+                        suffix = f".blocks[{child_index}]" if compile_block is not block else ""
+                        compiled_regions.append(f"{attr}[{index}]{suffix}")
         else:
             for name in stack_regions[strategy]:
                 region = getattr(root, name, None)
@@ -422,6 +476,10 @@ class FSDP2Trainer(BaseWanTrainer):
             setter = getattr(m, "set_requires_gradient_sync", None)
             if callable(setter):
                 setter(bool(enabled))
+            if os.getenv("FSDP2_ACCUMULATE_UNSHARDED", "0") == "1":
+                setter = getattr(m, "set_reshard_after_backward", None)
+                if callable(setter):
+                    setter(bool(enabled), recurse=False)
 
     @contextmanager
     def _grad_sync_context(self, is_update_step: bool):
