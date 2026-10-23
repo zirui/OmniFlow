@@ -35,6 +35,15 @@ from omniflow.distributed import (
 )
 from omniflow.utils.log import logger
 
+def _pin_symm_mem_pools() -> None:
+    import ctypes
+
+    from torch.distributed import _symmetric_memory as symm_mem
+
+    for pool in list(getattr(symm_mem, "_symm_mem_pools", {}).values()):
+        ctypes.pythonapi.Py_IncRef(ctypes.py_object(pool))
+
+
 from .base import BaseWanTrainer
 
 
@@ -106,6 +115,58 @@ class FSDP2Trainer(BaseWanTrainer):
                 logger.info("FSDP2: Applied freeze_except (frozen non-trainable params)")
 
         self._apply_fsdp2()
+
+    def _sdma_all_gather_enabled(self) -> bool:
+        return (
+            os.getenv("FSDP_ALL_GATHER_BACKEND", "") == "rccl_sdma"
+            and os.getenv("FLUX_SDMA_ATTACH", "1") == "1"
+        )
+
+    def _maybe_attach_sdma_all_gather(self, module, module_name: str) -> None:
+        if not self._sdma_all_gather_enabled():
+            return
+        prefixes = [
+            prefix.strip()
+            for prefix in os.getenv("FSDP_SDMA_MODULES", "").split(",")
+            if prefix.strip()
+        ]
+        if prefixes and not any(
+            module_name == prefix or module_name.startswith(prefix + ".")
+            for prefix in prefixes
+        ):
+            return
+
+        from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
+            SymmMemAllGather,
+        )
+
+        try:
+            state = module._get_fsdp_state()
+        except Exception:
+            return
+        groups = getattr(state, "_fsdp_param_groups", None) or []
+        if len(groups) != 1:
+            if self.rank == 0:
+                logger.warning(
+                    f"FSDP2/SDMA: skipping {type(module).__name__}: "
+                    f"expected one parameter group, found {len(groups)}"
+                )
+            return
+        try:
+            module.set_custom_all_gather(
+                SymmMemAllGather(groups[0]._all_gather_process_group, "NCCL")
+            )
+        except (AttributeError, ValueError, AssertionError) as error:
+            if self.rank == 0:
+                logger.warning(
+                    f"FSDP2/SDMA: failed to attach to {type(module).__name__}: {error}"
+                )
+            return
+        self._sdma_attached = getattr(self, "_sdma_attached", 0) + 1
+        if self._sdma_attached == 1:
+            import atexit
+
+            atexit.register(_pin_symm_mem_pools)
 
     def _apply_fsdp2(self):
         """Apply torch.distributed._composable.fsdp.fully_shard to the model."""
@@ -253,6 +314,7 @@ class FSDP2Trainer(BaseWanTrainer):
                 reshard_after_forward=False if module_path in no_reshard_paths else reshard_after_forward,
                 mp_policy=mp_policy,
             )
+            self._maybe_attach_sdma_all_gather(module, module_path)
             wrapped_paths += 1
         if self.rank == 0 and wrapped_paths:
             logger.info(
@@ -305,6 +367,7 @@ class FSDP2Trainer(BaseWanTrainer):
                         reshard_after_forward=reshard_after_forward,
                         mp_policy=mp_policy,
                     )
+                    self._maybe_attach_sdma_all_gather(module, module_name)
                     if checkpointed_module is not None:
                         seen.add(id(checkpointed_module))
                     wrapped_count += 1
@@ -318,6 +381,7 @@ class FSDP2Trainer(BaseWanTrainer):
             reshard_after_forward=reshard_after_forward,
             mp_policy=mp_policy,
         )
+        self._maybe_attach_sdma_all_gather(wrap_root, "")
         if self.rank == 0:
             logger.info(
                 f"FSDP2: applied fully_shard to '{wrap_target or '<model>'}' "

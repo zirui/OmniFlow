@@ -1,0 +1,6 @@
+FROM zirui3/primus-v26.7-flux:v0.1@sha256:082afc328d867f79ab5c4a46bc29c909bd891e068a32506a10768e6a6cc7e7c8
+
+LABEL org.opencontainers.image.source="https://github.com/zirui/OmniFlow" \
+      com.amd.mlperf.flux.profile="pure-mxfp8-sdma"
+
+CMD ["/usr/bin/bash"]

@@ -366,6 +366,37 @@ def test_fsdp2_compile_strategy_controls_layer_sharding(monkeypatch, strategy, w
     assert wrapped_names == wrapped_stacks
 
 
+def test_fsdp2_attaches_sdma_all_gather_to_selected_modules(monkeypatch):
+    from torch.distributed.fsdp._fully_shard import _fsdp_collectives
+
+    attached = []
+    process_group = object()
+
+    class FakeAllGather:
+        def __init__(self, group, backend):
+            assert group is process_group
+            assert backend == "NCCL"
+
+    class FakeModule:
+        def _get_fsdp_state(self):
+            group = type("Group", (), {"_all_gather_process_group": process_group})()
+            return type("State", (), {"_fsdp_param_groups": [group]})()
+
+        def set_custom_all_gather(self, all_gather):
+            attached.append(all_gather)
+
+    monkeypatch.setattr(_fsdp_collectives, "SymmMemAllGather", FakeAllGather, raising=False)
+    monkeypatch.setenv("FSDP_ALL_GATHER_BACKEND", "rccl_sdma")
+    monkeypatch.setenv("FSDP_SDMA_MODULES", "single_blocks")
+    trainer = FSDP2Trainer.__new__(FSDP2Trainer)
+    trainer.rank = 1
+
+    trainer._maybe_attach_sdma_all_gather(FakeModule(), "double_blocks.0")
+    trainer._maybe_attach_sdma_all_gather(FakeModule(), "single_blocks.0")
+
+    assert len(attached) == 1
+
+
 def test_fsdp2_compile_output_head_in_place(monkeypatch):
     root = torch.nn.Module()
     root.final_layer = torch.nn.Linear(2, 2)

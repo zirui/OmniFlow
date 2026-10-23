@@ -22,6 +22,15 @@ docker build -f examples/mlperf/flux1/Dockerfile.mxfp4 \
   -t zirui3/primus-v26.3-flux:v0.4-mxfp4-mixed-quant-uos .
 ```
 
+Native MXFP8 SDMA AllGather uses the v26.7 runtime, whose packaged
+Primus-Turbo matches the qualified `dev/flux-a6w4` implementation. Build the
+pinned runtime from the OmniFlow repository root:
+
+```bash
+docker build -f examples/mlperf/flux1/Dockerfile.mxfp8-v267 \
+  -t zirui3/primus-v26.7-flux:mxfp8-sdma .
+```
+
 ## Data
 
 Download the preprocessed MLPerf datasets:
@@ -53,6 +62,8 @@ batch size:
 | `config_1n_gbs1024.sh` | 1 | 32 | 4 | 1024 |
 | `config_2n_gbs1024.sh` | 2 | 32 | 2 | 1024 |
 | `config_4n_gbs1024.sh` | 4 | 32 | 1 | 1024 |
+| `config_4n_gbs1024_mxfp8_pure_ag_v61.sh` | 4 | 32 | 1 | 1024 |
+| `config_4n_gbs1024_mxfp8_pure_ag_v61_sdma.sh` | 4 | 32 | 1 | 1024 |
 | `config_4n_gbs1024_mxfp4_pareto_a.sh` | 4 | 32 | 1 | 1024 |
 | `config_4n_gbs1024_mxfp4_pareto_b.sh` | 4 | 32 | 1 | 1024 |
 | `config_4n_gbs1024_mxfp4_custom.sh` | 4 | 32 | 1 | 1024 |
